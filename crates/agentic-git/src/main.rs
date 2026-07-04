@@ -206,6 +206,18 @@ fn shim_main() {
             // control-flow-inert; the `exec_real_git` below is unchanged.
             log_nonagent_canonical_checkout(&home, &agent, &args);
         }
+        // Impl-review finding (deviation #4): a solo user who EXPLICITLY opted
+        // into the recovery net (AGENTIC_GIT_SNAPSHOTS=1) but has no agent
+        // context must still get it — otherwise the `noagent` fallback the
+        // design promises is dead code. `maybe_snapshot` is a no-op unless the
+        // op is destructive AND snapshots are enabled, so this only fires on a
+        // consented opt-in; it snapshots to the repo's own refs (no home
+        // needed), with who=noagent, and is additive + fail-open — the
+        // passthrough `exec_real_git` below is unchanged.
+        if let Some(idx) = subcommand_index(&args) {
+            let dir = effective_cwd_through_globals(&args, idx);
+            snapshot::maybe_snapshot(&args, &dir, &home, &agent);
+        }
         exec_real_git(&args, None);
     }
 

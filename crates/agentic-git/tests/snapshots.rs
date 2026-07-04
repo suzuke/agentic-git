@@ -863,3 +863,103 @@ fn run_session_snapshots_off_respects_explicit_kill_switch() {
     );
     cleanup(&root);
 }
+
+// ── impl-review regressions (PR #5 review round 1) ──────────────────────
+
+/// `git switch --discard-changes <own-branch>` discards the worktree even
+/// when already on that branch — and `args[1]` being a flag bypasses the
+/// shim's `args[1]`-only cross-branch deny, so it REACHES the hook (unlike
+/// bare `checkout HEAD <path>`, which the deny matrix rejects as "cross-branch
+/// to HEAD" and thus never destroys — verified: it is denied, not run). Real
+/// bound-agent run: the pre-op bytes must be recoverable from the snapshot the
+/// switch classifier fix now creates.
+#[test]
+fn switch_discard_changes_is_recoverable_review() {
+    let root = tempdir("switch-discard");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let real_git = resolve_setup_real_git();
+    init_repo(&real_git, &repo);
+    let wt = worktree_of(&root, &real_git, &repo, "agent/swrec");
+    let home = root.join("home");
+    write_binding(&home, "agent-sw", "agent/swrec", &wt);
+
+    std::fs::write(wt.join("README.md"), "DIRTY EDIT\n").unwrap();
+    let out = run_shim(
+        &repo,
+        &home,
+        "agent-sw",
+        &real_git,
+        &[("AGENTIC_GIT_SNAPSHOTS", "1")],
+        &["switch", "--discard-changes", "agent/swrec"],
+    );
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    // The op discarded the edit...
+    assert_eq!(std::fs::read_to_string(wt.join("README.md")).unwrap(), "hello\n");
+    // ...but a snapshot captured it, byte-recoverable.
+    let refs = snapshot_refs(&real_git, &repo);
+    assert_eq!(refs.len(), 1, "switch --discard-changes must snapshot: {refs:?}");
+    setup_git(&real_git, &["checkout", &refs[0], "--", "."], &wt);
+    assert_eq!(
+        std::fs::read_to_string(wt.join("README.md")).unwrap(),
+        "DIRTY EDIT\n"
+    );
+    cleanup(&root);
+}
+
+/// Deviation #4 fix: a solo user with only `AGENTIC_GIT_SNAPSHOTS=1` and NO
+/// agent/home context still gets the net (who=`noagent`) via the non-agent
+/// early-exit path; and with snapshots NOT enabled that same raw path creates
+/// zero refs (default-off boundary preserved).
+#[test]
+fn solo_opt_in_noagent_snapshots_review() {
+    let root = tempdir("solo-optin");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let real_git = resolve_setup_real_git();
+    init_repo(&real_git, &repo); // plain repo, no remote → not canonical-rooted
+
+    let dirty = || std::fs::write(repo.join("README.md"), "SOLO DIRTY\n").unwrap();
+    let run_noagent = |snap: Option<&str>| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_agentic-git"));
+        c.arg0("git")
+            .args(["reset", "--hard"])
+            .current_dir(&repo)
+            .env("AGENTIC_GIT_REAL_GIT", &real_git)
+            .env("PATH", sanitized_path(&real_git))
+            .env_remove("AGENTIC_GIT_HOME")
+            .env_remove("AGEND_HOME")
+            .env_remove("AGENTIC_GIT_AGENT")
+            .env_remove("AGEND_INSTANCE_NAME")
+            .env_remove("AGENTIC_GIT_BYPASS")
+            .env_remove("AGEND_GIT_BYPASS")
+            .env_remove("AGENTIC_GIT_SHIM_DEPTH")
+            .env_remove("AGEND_GIT_SHIM_DEPTH")
+            .env_remove("AGENTIC_GIT_SNAPSHOTS")
+            .env_remove("AGEND_GIT_SNAPSHOTS")
+            .env_remove("GIT_AUTHOR_DATE")
+            .env_remove("GIT_COMMITTER_DATE");
+        if let Some(v) = snap {
+            c.env("AGENTIC_GIT_SNAPSHOTS", v);
+        }
+        c.output().expect("run shim noagent")
+    };
+
+    // (a) opted in, no agent → snapshot with who=noagent.
+    dirty();
+    let out = run_noagent(Some("1"));
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let refs = snapshot_refs(&real_git, &repo);
+    assert_eq!(refs.len(), 1, "solo opt-in must snapshot with no agent: {refs:?}");
+    assert!(refs[0].contains("/noagent/"), "who must be noagent: {}", refs[0]);
+
+    // (b) default off, no agent → zero refs.
+    setup_git(&real_git, &["update-ref", "-d", &refs[0]], &repo);
+    dirty();
+    assert!(run_noagent(None).status.success());
+    assert!(
+        snapshot_refs(&real_git, &repo).is_empty(),
+        "default-off must create no ref"
+    );
+    cleanup(&root);
+}

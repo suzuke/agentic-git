@@ -83,12 +83,34 @@ fn stash_is_destructive(rest: &[String]) -> bool {
     matches!(rest.first().map(String::as_str), Some("drop") | Some("clear"))
 }
 
-/// `checkout -- <paths>` (pathspec overwrite) or `checkout -f`/`--force`.
-/// A plain branch-switch checkout (no pathspec separator, no force) is left
-/// alone per the v1 list — it is not the "overwrite pathspecs" shape.
+/// `checkout` overwrites the working tree in several shapes:
+///   `checkout -- <paths>` · `checkout -f`/`--force` · `checkout <path>` ·
+///   `checkout <tree-ish> <path>` (e.g. `git checkout HEAD f.txt`).
+/// Impl-review finding: the original `--`/`-f`-only rule missed
+/// `checkout HEAD f.txt` (pathspec restore with NO separator and no force),
+/// which git happily applies to a dirty tree. Rule: destructive if `--` /
+/// `-f` / `--force`, OR any POSITIONAL arg survives after skipping options
+/// (branch-create flags `-b`/`-B`/`--orphan` consume their following value).
+/// Bias-to-snapshot is safe: the only false-positive is a dirty same-branch
+/// `checkout <curbranch>` — git no-ops it and skip-when-clean bounds the
+/// waste; cross-branch checkouts are denied upstream and never reach here.
 fn checkout_is_destructive(rest: &[String]) -> bool {
-    rest.iter()
-        .any(|a| a == "--" || a == "-f" || a == "--force")
+    if rest.iter().any(|a| a == "--" || a == "-f" || a == "--force") {
+        return true;
+    }
+    let mut i = 0;
+    while i < rest.len() {
+        let a = rest[i].as_str();
+        match a {
+            // branch-create/target flags take a value → skip both.
+            "-b" | "-B" | "--orphan" => i += 2,
+            // any other option (incl. `-t`, `--track`, `--detach`, …) → skip.
+            _ if a.starts_with('-') => i += 1,
+            // a positional: a pathspec or a tree-ish before one → overwrite.
+            _ => return true,
+        }
+    }
+    false
 }
 
 /// `restore` overwrites the WORKING TREE unless it is a pure `--staged`
@@ -156,7 +178,13 @@ pub(crate) fn maybe_snapshot(args: &[String], target_dir: &Path, home: &str, age
                 "agentic-git: warning \u{2014} pre-op snapshot FAILED ({reason}); proceeding \
                  without a safety net"
             );
-            write_git_event_typed(home, agent, op_slug, "snapshot_failed", None, Some(&reason));
+            // Best-effort telemetry: only when we have a home to write it to.
+            // The solo-opt-in path (no AGENTIC_GIT_HOME) still snapshots — it
+            // just can't journal a failure. An empty home would otherwise
+            // land `fleet_events.jsonl` in the user's cwd.
+            if !home.is_empty() {
+                write_git_event_typed(home, agent, op_slug, "snapshot_failed", None, Some(&reason));
+            }
         }
     }
 }

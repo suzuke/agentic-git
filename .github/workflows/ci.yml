@@ -40,8 +40,9 @@ jobs:
         run: |
           unset AGENTIC_GIT_HOME AGENTIC_GIT_AGENT AGENTIC_GIT_REAL_GIT \
                 AGENTIC_GIT_BYPASS AGENTIC_GIT_BYPASS_AGENT AGENTIC_GIT_BYPASS_UNTIL \
-                AGENTIC_GIT_SHIM_DEPTH AGENTIC_GIT_ALLOW_CANONICAL_MUTATE
+                AGENTIC_GIT_SHIM_DEPTH AGENTIC_GIT_ALLOW_CANONICAL_MUTATE \
+                AGENTIC_GIT_SNAPSHOTS
           cargo test --test legacy_env_adoption -- --nocapture --test-threads=1 | tee legacy-adoption.log
           test "${PIPESTATUS[0]}" -eq 0
-          grep -q "LEGACY-ADOPTION-CASES-RUN: 3" legacy-adoption.log
+          grep -q "LEGACY-ADOPTION-CASES-RUN: 4" legacy-adoption.log
         shell: bash

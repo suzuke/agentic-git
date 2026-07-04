@@ -798,8 +798,14 @@ fn disposition_for_covers_all_emitted_event_types_2379() {
     assert_eq!(disposition_for("deny"), Disposition::Deny);
     assert_eq!(disposition_for("deny_trust_root"), Disposition::Deny);
     assert_eq!(disposition_for("deny_protected_ref"), Disposition::Deny);
+    // #4 Δa v5: the snapshot-ref push guard is a fail-closed prevention
+    // denylist, same family as the two above.
+    assert_eq!(disposition_for("deny_snapshot_ref_push"), Disposition::Deny);
     assert_eq!(disposition_for("cwd_worktree_drift"), Disposition::Warn);
     assert_eq!(disposition_for("git_conflict"), Disposition::Warn);
+    // #4: snapshot creation is fail-open — a failure is advisory (the
+    // destructive op still ran), never terminal.
+    assert_eq!(disposition_for("snapshot_failed"), Disposition::Warn);
     assert_eq!(
         disposition_for("post_merge_cleanup_exempt"),
         Disposition::Info

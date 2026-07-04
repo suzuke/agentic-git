@@ -1,12 +1,12 @@
 #!/bin/sh
-# agend-git #2234 — canonical-HEAD-detach instrument (daemon-managed via
-# binding.rs::install_hooks → $AGEND_HOME/hooks, the ACTIVE core.hooksPath).
+# agentic-git #2234 — canonical-HEAD-detach instrument (daemon-managed via
+# binding.rs::install_hooks → $AGENTIC_GIT_HOME/hooks, the ACTIVE core.hooksPath).
 #
 # WHY here and not <repo>/.git/hooks/: the canonical repo + every managed worktree
-# have core.hooksPath set to $AGEND_HOME/hooks, which SHADOWS .git/hooks — a hook
+# have core.hooksPath set to $AGENTIC_GIT_HOME/hooks, which SHADOWS .git/hooks — a hook
 # dropped there never fires (the empty-culprit-log mystery, #2234 Phase 1). This is
 # the one git-CLI layer no caller can bypass: real git always honors core.hooksPath
-# regardless of AGEND_GIT_BYPASS (that env var is the agend-git shim's, not git's),
+# regardless of AGENTIC_GIT_BYPASS (that env var is the agentic-git shim's, not git's),
 # so this catches the shim-bypassing detach culprits (agent BYPASS git, operator
 # real-git, daemon Command::new).
 #
@@ -26,7 +26,7 @@
 # Instrument-only, zero behavior. Reversible: delete this file.
 [ "$1" = "committed" ] || exit 0
 {
-  log_dir="${AGEND_HOME:-$HOME/.agend-terminal}"
+  log_dir="${AGENTIC_GIT_HOME:-${AGEND_HOME:-$HOME/.agend-terminal}}"
   log="$log_dir/head-detach-culprit.log"
   om=$(git rev-parse -q --verify refs/remotes/origin/main 2>/dev/null)
   [ -n "$om" ] || exit 0

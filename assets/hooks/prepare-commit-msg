@@ -12,21 +12,21 @@ case "$COMMIT_SOURCE" in
     merge|squash|template) exit 0 ;;
 esac
 
-# --- Fleet trailers (Agend-*) — only for a bound agent commit. ---
+# --- Fleet trailers (Agentic-*) — only for a bound agent commit. ---
 inject_agend_trailers() {
     msg_file="$1"
 
-    AGENT="${AGEND_INSTANCE_NAME:-}"
+    AGENT="${AGENTIC_GIT_AGENT:-${AGEND_INSTANCE_NAME:-}}"
     [ -n "$AGENT" ] || return 0
 
-    HOME_DIR="${AGEND_HOME:-}"
+    HOME_DIR="${AGENTIC_GIT_HOME:-${AGEND_HOME:-}}"
     [ -n "$HOME_DIR" ] || return 0
 
     BINDING="$HOME_DIR/runtime/$AGENT/binding.json"
     [ -f "$BINDING" ] || return 0
 
     # Idempotent: skip if trailer already present.
-    grep -q "^Agend-Agent:" "$msg_file" 2>/dev/null && return 0
+    grep -q "^Agentic-Agent:" "$msg_file" 2>/dev/null && return 0
 
     # Parse binding.json (minimal jq-free parsing via grep/sed).
     TASK=$(grep -o '"task_id"[[:space:]]*:[[:space:]]*"[^"]*"' "$BINDING" | sed 's/.*"task_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' 2>/dev/null)
@@ -36,10 +36,10 @@ inject_agend_trailers() {
     # Only inject if we have at least agent name.
     {
         echo ""
-        echo "Agend-Agent: $AGENT"
-        [ -n "$TASK" ] && echo "Agend-Task: $TASK"
-        [ -n "$BRANCH" ] && echo "Agend-Branch: $BRANCH"
-        [ -n "$ISSUED" ] && echo "Agend-Issued-At: $ISSUED"
+        echo "Agentic-Agent: $AGENT"
+        [ -n "$TASK" ] && echo "Agentic-Task: $TASK"
+        [ -n "$BRANCH" ] && echo "Agentic-Branch: $BRANCH"
+        [ -n "$ISSUED" ] && echo "Agentic-Issued-At: $ISSUED"
     } >> "$msg_file"
 }
 
@@ -81,7 +81,7 @@ add_dco_signoff() {
         return 0
     fi
 
-    # Keep the sign-off in the trailer block: contiguous with the Agend-* trailers
+    # Keep the sign-off in the trailer block: contiguous with the Agentic-* trailers
     # when present, otherwise separated from the body by one blank line.
     [ "$agend_trailers_present" = "1" ] || echo "" >> "$msg_file"
     printf 'Signed-off-by: %s <%s>\n' "$name" "$email" >> "$msg_file"
@@ -89,11 +89,11 @@ add_dco_signoff() {
 
 inject_agend_trailers "$COMMIT_MSG_FILE"
 
-if grep -q "^Agend-Agent:" "$COMMIT_MSG_FILE" 2>/dev/null; then
-    AGEND_PRESENT=1
+if grep -q "^Agentic-Agent:" "$COMMIT_MSG_FILE" 2>/dev/null; then
+    AGENTIC_PRESENT=1
 else
-    AGEND_PRESENT=0
+    AGENTIC_PRESENT=0
 fi
-add_dco_signoff "$COMMIT_MSG_FILE" "$AGEND_PRESENT"
+add_dco_signoff "$COMMIT_MSG_FILE" "$AGENTIC_PRESENT"
 
 exit 0

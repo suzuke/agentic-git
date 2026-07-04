@@ -6,10 +6,10 @@ param($CommitMsgFile, $CommitSource)
 # Skip merge/squash/template commits.
 if ($CommitSource -in @("merge", "squash", "template")) { exit 0 }
 
-$Agent = $env:AGEND_INSTANCE_NAME
+$Agent = $env:AGENTIC_GIT_AGENT
 if (-not $Agent) { exit 0 }
 
-$HomeDir = $env:AGEND_HOME
+$HomeDir = $env:AGENTIC_GIT_HOME
 if (-not $HomeDir) { exit 0 }
 
 $Binding = Join-Path $HomeDir "runtime" $Agent "binding.json"
@@ -17,7 +17,7 @@ if (-not (Test-Path $Binding)) { exit 0 }
 
 # Idempotent: skip if trailer already present.
 $Content = Get-Content $CommitMsgFile -Raw -ErrorAction SilentlyContinue
-if ($Content -match "^Agend-Agent:") { exit 0 }
+if ($Content -match "^Agentic-Agent:") { exit 0 }
 
 # Parse binding.json.
 try {
@@ -28,10 +28,10 @@ try {
 } catch { exit 0 }
 
 # Append trailers.
-$Trailers = "`n`nAgend-Agent: $Agent"
-if ($Task) { $Trailers += "`nAgend-Task: $Task" }
-if ($Branch) { $Trailers += "`nAgend-Branch: $Branch" }
-if ($Issued) { $Trailers += "`nAgend-Issued-At: $Issued" }
+$Trailers = "`n`nAgentic-Agent: $Agent"
+if ($Task) { $Trailers += "`nAgentic-Task: $Task" }
+if ($Branch) { $Trailers += "`nAgentic-Branch: $Branch" }
+if ($Issued) { $Trailers += "`nAgentic-Issued-At: $Issued" }
 
 Add-Content -Path $CommitMsgFile -Value $Trailers
 exit 0

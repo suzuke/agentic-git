@@ -206,3 +206,24 @@ fn check_reuse_branch_mismatch_is_hard_error() {
     }
     std::fs::remove_dir_all(&home).ok();
 }
+
+/// Impl-review regression (Δ2): the temp key file must be 0600 FROM BIRTH —
+/// reverting `open_new_0600` to `fs::write` + post-hoc chmod turns this RED
+/// (the freshly created file would carry umask-default perms at open time).
+#[cfg(unix)]
+#[test]
+fn key_tmp_file_is_0600_at_creation_review4() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("agit-0600-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("k.tmp");
+    let f = super::open_new_0600(&p).expect("create");
+    // Stat while the handle is still open and BEFORE any write/chmod could
+    // have happened: mode must already be 0600.
+    let mode = f.metadata().unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "temp key must be born 0600, got {mode:o}");
+    // And create_new must refuse a pre-planted path.
+    assert!(super::open_new_0600(&p).is_err(), "create_new must refuse existing path");
+    let _ = std::fs::remove_dir_all(&dir);
+}

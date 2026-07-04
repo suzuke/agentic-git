@@ -230,16 +230,13 @@ fn ensure_key(home: &Path) -> Result<(), String> {
 
     let mut key = [0u8; KEY_LEN];
     getrandom::fill(&mut key).map_err(|e| format!("getrandom: {e}"))?;
-    std::fs::write(&tmp_path, key).map_err(|e| format!("write temp key: {e}"))?;
-    #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("chmod temp key: {e}"))?;
-    }
-    // fsync before the hard_link "publish" — the link must never observe a
-    // not-yet-durable write.
-    if let Ok(f) = std::fs::File::open(&tmp_path) {
+        use std::io::Write;
+        let mut f = open_new_0600(&tmp_path).map_err(|e| format!("create temp key: {e}"))?;
+        f.write_all(&key)
+            .map_err(|e| format!("write temp key: {e}"))?;
+        // fsync before the hard_link "publish" — the link must never observe
+        // a not-yet-durable write.
         let _ = f.sync_all();
     }
 
@@ -723,3 +720,19 @@ fn run_cmd(raw_args: &[String]) -> ! {
 
 #[cfg(test)]
 mod tests;
+
+/// Impl-review finding (Δ2 literalism): secret-bearing files must carry
+/// their restrictive mode AT OPEN TIME, not gain it via a later chmod —
+/// `fs::write` + `set_permissions` leaves a umask-dependent window where
+/// another local uid can read the HMAC key and forge binding sidecars.
+/// `create_new` additionally refuses a pre-planted path.
+fn open_new_0600(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
+}

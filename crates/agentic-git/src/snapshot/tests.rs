@@ -106,15 +106,21 @@ fn restore_destructive_unless_staged_only() {
 /// overwriting shape is caught; pure branch-create/switch shapes are not.
 #[test]
 fn checkout_destructive_matrix_covers_pathspec_restore() {
-    // Destructive — worktree overwrite:
+    // Destructive — worktree overwrite (fail-safe default catches every
+    // reachable spelling incl. flag-forms with no positional):
     for argv in [
-        vec!["checkout", "--", "f.txt"],      // explicit pathspec separator
-        vec!["checkout", "-f", "feat/x"],     // force
-        vec!["checkout", "--force"],          // force, no arg
-        vec!["checkout", "f.txt"],            // bare pathspec (1 positional)
-        vec!["checkout", "HEAD", "f.txt"],    // tree-ish + pathspec (2 positionals)
-        vec!["checkout", "abc123", "src/"],   // sha + pathspec
-        vec!["checkout", "-p", "f.txt"],      // patch mode + positional
+        vec!["checkout", "--", "f.txt"],                 // explicit pathspec sep
+        vec!["checkout", "-f", "feat/x"],                // force
+        vec!["checkout", "--force"],                     // force, no arg
+        vec!["checkout", "f.txt"],                       // bare pathspec
+        vec!["checkout", "HEAD", "f.txt"],               // tree-ish + pathspec
+        vec!["checkout", "abc123", "src/"],              // sha + pathspec
+        vec!["checkout", "-p", "f.txt"],                 // patch mode
+        vec!["checkout", "--ours", "f.txt"],             // conflict side restore
+        vec!["checkout", "--theirs", "f.txt"],           // conflict side restore
+        vec!["checkout", "--pathspec-from-file=ps"],     // review-2 repro: NO positional
+        vec!["checkout", "--pathspec-from-file", "ps"],  // space-separated form
+        vec!["checkout", "main"],                        // ambiguous 1-arg → bias to snapshot
     ] {
         assert_eq!(
             destructive_op_slug(&s(&argv)),
@@ -122,12 +128,12 @@ fn checkout_destructive_matrix_covers_pathspec_restore() {
             "must classify destructive: {argv:?}"
         );
     }
-    // NOT destructive — pure branch create/switch, no worktree overwrite:
+    // NOT destructive — pure branch create, or a no-op empty invocation:
     for argv in [
         vec!["checkout", "-b", "feat/x"],           // create branch
         vec!["checkout", "-B", "feat/x"],           // create/reset branch ref
         vec!["checkout", "--orphan", "gh-pages"],   // orphan branch
-        vec!["checkout"],                           // no positional
+        vec!["checkout"],                           // no args → git errors, no-op
     ] {
         assert_eq!(
             destructive_op_slug(&s(&argv)),

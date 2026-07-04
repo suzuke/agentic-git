@@ -83,34 +83,33 @@ fn stash_is_destructive(rest: &[String]) -> bool {
     matches!(rest.first().map(String::as_str), Some("drop") | Some("clear"))
 }
 
-/// `checkout` overwrites the working tree in several shapes:
-///   `checkout -- <paths>` · `checkout -f`/`--force` · `checkout <path>` ·
-///   `checkout <tree-ish> <path>` (e.g. `git checkout HEAD f.txt`).
-/// Impl-review finding: the original `--`/`-f`-only rule missed
-/// `checkout HEAD f.txt` (pathspec restore with NO separator and no force),
-/// which git happily applies to a dirty tree. Rule: destructive if `--` /
-/// `-f` / `--force`, OR any POSITIONAL arg survives after skipping options
-/// (branch-create flags `-b`/`-B`/`--orphan` consume their following value).
-/// Bias-to-snapshot is safe: the only false-positive is a dirty same-branch
-/// `checkout <curbranch>` — git no-ops it and skip-when-clean bounds the
-/// waste; cross-branch checkouts are denied upstream and never reach here.
+/// `checkout` has a large worktree-overwriting surface (`-- <paths>`, `-f`,
+/// `<path>`, `<tree-ish> <path>`, `-p`, `--ours`/`--theirs <path>`,
+/// `--pathspec-from-file=<f>`, …). Two rounds of impl review showed that
+/// enumerating the *destructive* flag set is a losing game (each round found
+/// another spelling: `checkout HEAD f.txt`, then `--pathspec-from-file`). So —
+/// exactly as the push guard was re-scoped — checkout uses the **fail-safe
+/// default**: a checkout that reaches this hook is treated as destructive
+/// UNLESS it is a pure branch-creation (`-b`/`-B`/`--orphan`, no force). For a
+/// recovery net the asymmetry is deliberate: an over-snapshot is a wasted ref
+/// (pruned in 7d, and only ever taken on a DIRTY tree via skip-when-clean),
+/// whereas an under-snapshot is lost work. Cross-branch `checkout <branch>` is
+/// denied upstream and never reaches here; same-branch is a harmless no-op.
 fn checkout_is_destructive(rest: &[String]) -> bool {
+    // `git checkout` with no arguments errors — nothing runs, nothing to save.
+    if rest.is_empty() {
+        return false;
+    }
     if rest.iter().any(|a| a == "--" || a == "-f" || a == "--force") {
         return true;
     }
-    let mut i = 0;
-    while i < rest.len() {
-        let a = rest[i].as_str();
-        match a {
-            // branch-create/target flags take a value → skip both.
-            "-b" | "-B" | "--orphan" => i += 2,
-            // any other option (incl. `-t`, `--track`, `--detach`, …) → skip.
-            _ if a.starts_with('-') => i += 1,
-            // a positional: a pathspec or a tree-ish before one → overwrite.
-            _ => return true,
-        }
-    }
-    false
+    // Pure branch creation does not discard worktree content (a dirty tree is
+    // carried onto the new branch). Everything else that reaches the hook
+    // touches the worktree — snapshot it.
+    let branch_create = rest
+        .iter()
+        .any(|a| a == "-b" || a == "-B" || a == "--orphan");
+    !branch_create
 }
 
 /// `restore` overwrites the WORKING TREE unless it is a pure `--staged`

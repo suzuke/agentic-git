@@ -963,3 +963,44 @@ fn solo_opt_in_noagent_snapshots_review() {
     );
     cleanup(&root);
 }
+
+/// Impl-review round 2 (fugu): `git checkout --pathspec-from-file=<f>` is a
+/// REACHABLE worktree discard (`args[1]` is a flag → dodges the args[1]-only
+/// cross-branch deny → runs → restores the listed paths, discarding edits),
+/// non-interactive, and the flag-enumerating classifier missed it. The
+/// fail-safe checkout rule now snapshots it; the discarded bytes recover.
+#[test]
+fn checkout_pathspec_from_file_is_recoverable_review2() {
+    let root = tempdir("checkout-psff");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let real_git = resolve_setup_real_git();
+    init_repo(&real_git, &repo);
+    let wt = worktree_of(&root, &real_git, &repo, "agent/psff");
+    let home = root.join("home");
+    write_binding(&home, "agent-ps", "agent/psff", &wt);
+
+    // A pathspec file listing README.md, and a dirty README.md to be discarded.
+    std::fs::write(wt.join("ps.txt"), "README.md\n").unwrap();
+    std::fs::write(wt.join("README.md"), "DIRTY EDIT\n").unwrap();
+    let out = run_shim(
+        &repo,
+        &home,
+        "agent-ps",
+        &real_git,
+        &[("AGENTIC_GIT_SNAPSHOTS", "1")],
+        &["checkout", "--pathspec-from-file=ps.txt"],
+    );
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    // The op discarded the edit (README reverted to committed content)...
+    assert_eq!(std::fs::read_to_string(wt.join("README.md")).unwrap(), "hello\n");
+    // ...but a snapshot captured it, byte-recoverable.
+    let refs = snapshot_refs(&real_git, &repo);
+    assert_eq!(refs.len(), 1, "--pathspec-from-file must snapshot: {refs:?}");
+    setup_git(&real_git, &["checkout", &refs[0], "--", "README.md"], &wt);
+    assert_eq!(
+        std::fs::read_to_string(wt.join("README.md")).unwrap(),
+        "DIRTY EDIT\n"
+    );
+    cleanup(&root);
+}

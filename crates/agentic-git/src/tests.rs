@@ -3022,3 +3022,54 @@ fn tracked_tree_has_zero_trust_root_hits_persistent_guard_2379() {
              through silently."
     );
 }
+
+// ── review-1 regressions: legacy-fleet compatibility ──────────────────────
+
+/// Review-1 finding 1: a legacy agend-terminal fleet's hooks write `Agend-*`
+/// trailers; the heartbeat body scan must tolerate BOTH trailer generations,
+/// or init-pile cleanup silently stops recognizing legacy heartbeats.
+#[test]
+fn empty_heartbeat_with_legacy_agend_trailers_detected_review1() {
+    let base = std::env::temp_dir().join(format!("agit-legacy-hb-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&base)
+            .env("AGENTIC_GIT_BYPASS", "1")
+            .env("AGEND_GIT_BYPASS", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git spawn");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    };
+    git(&["init", "-q", "."]);
+    git(&["config", "commit.gpgsign", "false"]);
+    git(&["commit", "--allow-empty", "-q", "-m", "seed"]);
+    // Empty heartbeat whose body carries LEGACY trailers only.
+    git(&[
+        "commit",
+        "--allow-empty",
+        "-q",
+        "-m",
+        "init",
+        "-m",
+        "Agend-Agent: legacy-agent\nAgend-Branch: feat/x\nAgend-Issued-At: 2026-01-01T00:00:00Z",
+    ]);
+    let hash_out = git(&["rev-parse", "HEAD"]);
+    let hash = String::from_utf8_lossy(&hash_out.stdout).trim().to_string();
+    assert!(
+        commit_is_empty_heartbeat(base.to_str().unwrap(), &hash),
+        "legacy Agend-* trailers must still count as an empty heartbeat"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}

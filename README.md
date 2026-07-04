@@ -91,9 +91,12 @@ mkdir -p "$AGENTIC_GIT_HOME/bin"
 ln -sf "$PWD/target/release/agentic-git" "$AGENTIC_GIT_HOME/bin/git"
 
 # In the agent's environment (NOT your own shell):
+export AGENTIC_GIT_REAL_GIT="$(command -v git)"   # optional — resolve BEFORE touching PATH
 export PATH="$AGENTIC_GIT_HOME/bin:$PATH"
 export AGENTIC_GIT_AGENT=my-agent
-export AGENTIC_GIT_REAL_GIT="$(command -v git)"   # optional; auto-resolved otherwise
+# (Order matters: `command -v git` after the PATH prepend would capture the
+# shim itself. The shim detects and ignores a self-referential REAL_GIT and
+# falls back to a self-excluding PATH search, but don't rely on it.)
 
 git status          # → passthrough
 git checkout main   # → denied, with the reason and the way out

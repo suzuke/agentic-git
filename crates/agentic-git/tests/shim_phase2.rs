@@ -479,3 +479,71 @@ fn shim_denies_agent_bypass_canonical_provisioning_2234() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// Review-1 hardening: `AGENTIC_GIT_REAL_GIT` pointing at the shim itself
+/// (the README-order foot-gun: `command -v git` AFTER prepending the shim
+/// dir to PATH) must be ignored — the shim falls back to the self-excluding
+/// PATH search instead of self-exec'ing into the #1504 depth cap (exit 70).
+#[test]
+fn self_referential_real_git_env_ignored_review1() {
+    let shim = env!("CARGO_BIN_EXE_agentic-git");
+    let real_git = std::path::Path::new("/usr/bin/git");
+    if !real_git.exists() {
+        eprintln!("skipping: /usr/bin/git not present on this host");
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("agit-selfref-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let home = root.join("home");
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let realdir = root.join("realbin");
+    std::fs::create_dir_all(&realdir).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(shim, bin.join("git")).unwrap();
+        std::os::unix::fs::symlink(real_git, realdir.join("git")).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        eprintln!("skipping: unix-only symlink fixture");
+        return;
+    }
+    // Scratch repo built with the REAL git directly (never through any shim).
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    assert!(std::process::Command::new(real_git)
+        .args(["init", "-q", "."])
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+    let path_env = std::env::join_paths([bin.clone(), realdir.clone()]).unwrap();
+    let out = std::process::Command::new(shim)
+        .args(["status"])
+        .current_dir(&repo)
+        .env("PATH", &path_env)
+        .env("AGENTIC_GIT_HOME", &home)
+        // The foot-gun under test: REAL_GIT resolves to the shim itself.
+        .env("AGENTIC_GIT_REAL_GIT", shim)
+        .env_remove("AGEND_REAL_GIT")
+        .env_remove("AGEND_HOME")
+        .env_remove("AGENTIC_GIT_AGENT")
+        .env_remove("AGEND_INSTANCE_NAME")
+        .env_remove("AGENTIC_GIT_SHIM_DEPTH")
+        .env_remove("AGEND_GIT_SHIM_DEPTH")
+        .env_remove("AGENTIC_GIT_BYPASS")
+        .env_remove("AGEND_GIT_BYPASS")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "self-referential REAL_GIT must fall back to the PATH search; stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("recursion guard"),
+        "must not trip the #1504 recursion guard: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -189,13 +189,25 @@ pub(crate) fn maybe_snapshot(args: &[String], target_dir: &Path, home: &str, age
 }
 
 fn is_clean(git: &str, dir: &Path) -> bool {
-    git_bypass(git)
+    let Ok(o) = git_bypass(git)
         .arg("-C")
         .arg(dir)
         .args(["status", "--porcelain"])
         .output()
-        .map(|o| o.status.success() && o.stdout.is_empty())
-        .unwrap_or(false)
+    else {
+        return false;
+    };
+    if !o.status.success() {
+        return false;
+    }
+    // Review finding: a `run`-provisioned worktree carries an untracked
+    // `.agend-managed` marker (disk contract). Left counted, it makes EVERY
+    // fresh session's tree look dirty, so skip-when-clean never fires and a
+    // clean-tree destructive op still snapshots. Treat a tree whose ONLY
+    // untracked entry is that marker as clean — any real change still snapshots.
+    String::from_utf8_lossy(&o.stdout)
+        .lines()
+        .all(|l| l.trim().is_empty() || l == "?? .agend-managed")
 }
 
 fn who_for(agent: &str) -> &str {
@@ -303,6 +315,16 @@ fn create_snapshot_inner(
     commit_cmd
         .arg("-C")
         .arg(dir)
+        // Force a self-contained identity: `commit-tree` REQUIRES an
+        // author+committer, and a fresh CI runner / container / un-configured
+        // machine has no git `user.name`/`user.email` — there, the snapshot's
+        // commit-tree would silently fail (fail-open → NO safety net) exactly
+        // where the recovery layer is supposed to work. A fixed identity makes
+        // snapshots environment-independent. (Dates are forced below.)
+        .env("GIT_AUTHOR_NAME", "agentic-git")
+        .env("GIT_AUTHOR_EMAIL", "agentic-git@localhost")
+        .env("GIT_COMMITTER_NAME", "agentic-git")
+        .env("GIT_COMMITTER_EMAIL", "agentic-git@localhost")
         .env("GIT_AUTHOR_DATE", now_ident_date())
         .env("GIT_COMMITTER_DATE", now_ident_date())
         .arg("commit-tree")

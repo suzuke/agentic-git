@@ -1222,9 +1222,19 @@ fn classify(
                 }
                 return Action::Deny("unbound — no active task assignment".into());
             }
+            // A `checkout <tree-ish> -- <pathspec>` restores working-tree paths
+            // from that tree; it does NOT switch branches (the bound branch is
+            // unchanged). Denying it as "cross-branch" broke the recovery
+            // layer's OWN documented restore — `git checkout <snapshot-ref> -- .`
+            // — leaving snapshots un-restorable without bypass (impl-review
+            // finding). Only `switch`, and `checkout` WITHOUT a `--` pathspec,
+            // are branch-switch shapes the cross-branch guard should judge.
+            let is_pathspec_restore =
+                args.first().is_some_and(|s| s == "checkout") && args.iter().any(|a| a == "--");
             // Check for cross-branch attempt.
             if let Some(ref assigned) = binding.branch {
-                if !target_branch.is_empty()
+                if !is_pathspec_restore
+                    && !target_branch.is_empty()
                     && target_branch != assigned
                     && !target_branch.starts_with('-')
                 {

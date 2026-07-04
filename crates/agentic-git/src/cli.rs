@@ -523,11 +523,11 @@ fn check_reuse(
 
 // ── Hooks (step 6) ───────────────────────────────────────────────────────
 
-const HOOK_PREPARE_COMMIT_MSG: &str = include_str!("../../../assets/hooks/prepare-commit-msg");
-const HOOK_REFERENCE_TRANSACTION: &str = include_str!("../../../assets/hooks/reference-transaction");
+const HOOK_PREPARE_COMMIT_MSG: &str = include_str!("../assets/hooks/prepare-commit-msg");
+const HOOK_REFERENCE_TRANSACTION: &str = include_str!("../assets/hooks/reference-transaction");
 #[cfg(windows)]
 const HOOK_PREPARE_COMMIT_MSG_PS1: &str =
-    include_str!("../../../assets/hooks/prepare-commit-msg.ps1");
+    include_str!("../assets/hooks/prepare-commit-msg.ps1");
 
 fn write_hook(path: &Path, content: &str) -> Result<(), String> {
     std::fs::write(path, content).map_err(|e| format!("write hook {}: {e}", path.display()))?;
@@ -663,8 +663,24 @@ fn spawn_agent(cmd: &[String], worktree: &Path, home: &Path, agent: &str, real_g
     let new_path_parts: Vec<PathBuf> = std::iter::once(bin_dir)
         .chain(std::env::split_paths(&path_env))
         .collect();
-    let new_path: OsString =
-        std::env::join_paths(new_path_parts).unwrap_or(path_env);
+    // Review finding: a home path containing the PATH-list separator (':' on
+    // Unix, ';' on Windows) makes `join_paths` fail. Falling back to the
+    // ORIGINAL PATH would silently launch the agent UNGUARDED (its `git`
+    // resolves to the real binary, bypassing routing/deny/snapshots). Refuse
+    // loudly instead — a guarded session we can't guard is not a session.
+    let new_path: OsString = match std::env::join_paths(new_path_parts) {
+        Ok(p) => p,
+        Err(e) => {
+            let sep = if cfg!(windows) { ';' } else { ':' };
+            eprintln!(
+                "agentic-git: cannot build a guarded PATH — AGENTIC_GIT_HOME '{}' \
+                 contains a path-list separator ('{sep}'), which PATH cannot represent. \
+                 Refusing to launch the agent unguarded. Use a home path without '{sep}'. ({e})",
+                home.display()
+            );
+            return 78; // EX_CONFIG
+        }
+    };
 
     let (prog, rest) = match cmd.split_first() {
         Some(pair) => pair,

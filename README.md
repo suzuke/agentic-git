@@ -147,7 +147,8 @@ packaging. Known rough edges:
   (`bind_self`, `binding_state`) — being generalized.
 - **Recovery layer (done):** before a destructive op (`reset --hard`,
   `clean -f*`, `checkout -- <paths>`/`-f`, `restore` (worktree form),
-  `stash drop|clear`, `merge`/`rebase`/`pull`/`cherry-pick`/`revert`/`am`)
+  `switch -f`/`--discard-changes`, `stash drop|clear`,
+  `merge`/`rebase`/`pull`/`cherry-pick`/`revert`/`am`)
   runs in a git work tree, the shim snapshots the tree into a private
   `refs/agentic-git/snapshots/<who>/…` ref first (skipped when clean;
   fails open + loud, never blocks the op). The snapshot namespace is itself

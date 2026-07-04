@@ -60,6 +60,7 @@ pub(crate) fn destructive_op_slug(args: &[String]) -> Option<&'static str> {
         "stash" if stash_is_destructive(rest) => Some("stash"),
         "checkout" if checkout_is_destructive(rest) => Some("checkout"),
         "restore" if restore_touches_worktree(rest) => Some("restore"),
+        "switch" if switch_is_destructive(rest) => Some("switch"),
         _ => None,
     }
 }
@@ -97,6 +98,20 @@ fn restore_touches_worktree(rest: &[String]) -> bool {
     let staged = rest.iter().any(|a| a == "--staged" || a == "-S");
     let worktree = rest.iter().any(|a| a == "--worktree" || a == "-W");
     !staged || worktree
+}
+
+/// `switch -f`/`--force`/`--discard-changes` discards uncommitted worktree
+/// changes. Verified empirically: `git switch --discard-changes <current>`
+/// resets the tree to the branch tip even when already on that branch — a
+/// reachable working-tree-discard that a cross-branch deny does NOT catch (a
+/// bound agent may run it against its OWN branch). Plain `switch <branch>`
+/// that would clobber changes is refused by git (not destructive), so only
+/// the force/discard forms qualify. (Self-review addendum: the v1 op table
+/// said "checkout/restore" but switch's discard form is the same worktree
+/// hazard.)
+fn switch_is_destructive(rest: &[String]) -> bool {
+    rest.iter()
+        .any(|a| matches!(a.as_str(), "-f" | "--force" | "--discard-changes"))
 }
 
 // ── Activation (Δc) ─────────────────────────────────────────────────────

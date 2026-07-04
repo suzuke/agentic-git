@@ -94,6 +94,28 @@ fn restore_destructive_unless_staged_only() {
     );
 }
 
+/// Self-review addendum: `switch` with a force/discard flag discards the
+/// worktree (verified empirically even for the current branch), a reachable
+/// hazard the v1 table missed. A plain `switch` (branch move) is NOT
+/// snapshotted (cross-branch is denied upstream; a clean move loses nothing).
+#[test]
+fn switch_force_discard_forms_are_destructive() {
+    assert_eq!(destructive_op_slug(&s(&["switch", "feat/x"])), None);
+    assert_eq!(destructive_op_slug(&s(&["switch", "-c", "feat/x"])), None);
+    assert_eq!(
+        destructive_op_slug(&s(&["switch", "-f", "feat/x"])),
+        Some("switch")
+    );
+    assert_eq!(
+        destructive_op_slug(&s(&["switch", "--force", "feat/x"])),
+        Some("switch")
+    );
+    assert_eq!(
+        destructive_op_slug(&s(&["switch", "--discard-changes", "feat/x"])),
+        Some("switch")
+    );
+}
+
 #[test]
 fn mid_op_manglers_always_destructive() {
     for (argv, slug) in [

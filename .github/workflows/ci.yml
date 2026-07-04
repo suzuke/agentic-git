@@ -21,6 +21,13 @@ jobs:
       - run: cargo test --workspace
       - run: cargo clippy --workspace -- -D warnings
         if: matrix.os == 'ubuntu-latest'
+      # Publish gate: `cargo package` with the verify build catches crates that
+      # can't stand alone (e.g. an `include_str!` reaching outside the crate) —
+      # the class of bug that silently half-published a release once.
+      - run: cargo package -p agentic-git-core --allow-dirty
+        if: matrix.os == 'ubuntu-latest'
+      - run: cargo package -p agentic-git --allow-dirty
+        if: matrix.os == 'ubuntu-latest'
 
   # Windows has cfg(windows) code paths (copy-instead-of-symlink shim wiring,
   # status()+exit process replacement, case-insensitive dispatch) that have

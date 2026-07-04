@@ -45,7 +45,10 @@ jobs:
       # isn't reused.
       - name: publish to crates.io
         run: |
-          set -u
+          # GitHub runs `run:` under `bash -e`; disable errexit so a non-zero
+          # `cargo publish` (e.g. "already uploaded") is handled by our own
+          # exit-code logic below instead of aborting the whole step.
+          set +e
           publish() {
             pkg="$1"
             for i in $(seq 1 12); do

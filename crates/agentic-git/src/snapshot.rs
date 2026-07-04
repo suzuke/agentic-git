@@ -189,13 +189,25 @@ pub(crate) fn maybe_snapshot(args: &[String], target_dir: &Path, home: &str, age
 }
 
 fn is_clean(git: &str, dir: &Path) -> bool {
-    git_bypass(git)
+    let Ok(o) = git_bypass(git)
         .arg("-C")
         .arg(dir)
         .args(["status", "--porcelain"])
         .output()
-        .map(|o| o.status.success() && o.stdout.is_empty())
-        .unwrap_or(false)
+    else {
+        return false;
+    };
+    if !o.status.success() {
+        return false;
+    }
+    // Review finding: a `run`-provisioned worktree carries an untracked
+    // `.agend-managed` marker (disk contract). Left counted, it makes EVERY
+    // fresh session's tree look dirty, so skip-when-clean never fires and a
+    // clean-tree destructive op still snapshots. Treat a tree whose ONLY
+    // untracked entry is that marker as clean — any real change still snapshots.
+    String::from_utf8_lossy(&o.stdout)
+        .lines()
+        .all(|l| l.trim().is_empty() || l == "?? .agend-managed")
 }
 
 fn who_for(agent: &str) -> &str {

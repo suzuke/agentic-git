@@ -37,7 +37,7 @@ fn binding_write_read_roundtrip() {
 /// Hook script is valid shell (syntax check).
 #[test]
 fn hook_script_valid_shell_syntax() {
-    let hook = include_str!("../../../assets/hooks/prepare-commit-msg");
+    let hook = include_str!("../assets/hooks/prepare-commit-msg");
     assert!(hook.starts_with("#!/bin/sh"), "must have shebang");
     assert!(hook.contains("exit 0"), "must always exit 0");
     assert!(hook.contains("Agentic-Agent:"), "must inject agent trailer");
@@ -50,7 +50,7 @@ fn hook_script_valid_shell_syntax() {
 /// Hook idempotent: existing trailer → skip.
 #[test]
 fn hook_idempotent_skip_logic() {
-    let hook = include_str!("../../../assets/hooks/prepare-commit-msg");
+    let hook = include_str!("../assets/hooks/prepare-commit-msg");
     assert!(
         hook.contains("grep -q \"^Agentic-Agent:\""),
         "must check for existing trailer"
@@ -60,7 +60,7 @@ fn hook_idempotent_skip_logic() {
 /// Hook skips merge/squash/template commits.
 #[test]
 fn hook_skips_merge_squash_template() {
-    let hook = include_str!("../../../assets/hooks/prepare-commit-msg");
+    let hook = include_str!("../assets/hooks/prepare-commit-msg");
     assert!(
         hook.contains("merge|squash|template"),
         "must skip these sources"

@@ -143,24 +143,28 @@ protected-ref override, fail-closed) · `.agend-managed` worktree marker.
 ## Status & roadmap
 
 Alpha. Battle-tested logic (the history in this repo is the battle), fresh
-packaging. Known rough edges:
+packaging.
 
-- Some deny-message remedies still name agend-terminal MCP tools
-  (`bind_self`, `binding_state`) — being generalized.
-- **Recovery layer (done):** before a destructive op (`reset --hard`,
-  `clean -f*`, `checkout -- <paths>`/`-f`, `restore` (worktree form),
-  `switch -f`/`--discard-changes`, `stash drop|clear`,
-  `merge`/`rebase`/`pull`/`cherry-pick`/`revert`/`am`)
-  runs in a git work tree, the shim snapshots the tree into a private
-  `refs/agentic-git/snapshots/<who>/…` ref first (skipped when clean;
-  fails open + loud, never blocks the op). The snapshot namespace is itself
-  guarded against being pushed. Restore is manual in v1:
-  `git checkout <snapshot-ref> -- .`. Manage refs with
-  `agentic-git snapshots list|prune [--repo <path>]`. Off by default in raw
-  shim mode (`AGENTIC_GIT_SNAPSHOTS=1` to enable); on by default inside
-  `run` sessions.
-- Planned next: richer `policy.toml` (TTL/op-list config, currently
-  hardcoded defaults + flags) and a `snapshots restore` convenience command.
+**Recovery layer:** before a destructive op (`reset --hard`, `clean -f*`,
+any worktree-overwriting `checkout`/`restore`, `switch -f`/`--discard-changes`,
+`stash drop|clear`, `merge`/`rebase`/`pull`/`cherry-pick`/`revert`/`am`) runs
+in a git work tree, the shim snapshots the tree into a private
+`refs/agentic-git/snapshots/<who>/…` ref first (skipped when clean; fails open
++ loud, never blocks the op). The snapshot namespace is itself guarded against
+being pushed. Restore is manual in v1: `git checkout <snapshot-ref> -- .`.
+Manage refs with `agentic-git snapshots list|prune [--repo <path>]`. Off by
+default in raw shim mode (`AGENTIC_GIT_SNAPSHOTS=1` to enable); on by default
+inside `run` sessions.
+
+Known rough edges:
+
+- **Windows is unverified.** The `cfg(windows)` paths (copy-instead-of-symlink
+  wiring, `status()`+exit process replacement, case-insensitive dispatch) have
+  never run in the wild; CI exercises them as an *advisory* (non-blocking) job.
+- Restore is a documented manual step (`git checkout <snap> -- .`); a
+  `snapshots restore` convenience command is planned.
+- `policy.toml` covers protected-ref overrides; snapshot TTL / destructive-op
+  list are hardcoded defaults + flags — richer config is planned.
 
 ## License
 

@@ -22,6 +22,21 @@ jobs:
       - run: cargo clippy --workspace -- -D warnings
         if: matrix.os == 'ubuntu-latest'
 
+  # Windows has cfg(windows) code paths (copy-instead-of-symlink shim wiring,
+  # status()+exit process replacement, case-insensitive dispatch) that have
+  # never been publicly verified. Surface their real state WITHOUT gating
+  # merges (continue-on-error) until Windows support is a committed target —
+  # a red here is information, not a blocker. Unix tests use symlinks/exec that
+  # this job's failures don't reflect on.
+  test-windows-advisory:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --workspace
+      - run: cargo test --workspace
+
   # Δ5 / INVARIANT clause 5 (agentic-git issue #1, session mode): the
   # zero-daemon-change adoption guarantee is a REQUIRED job, not a manual
   # acceptance check. Explicitly unsets every `AGENTIC_GIT_*` variable — not

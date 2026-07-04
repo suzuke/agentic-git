@@ -91,7 +91,7 @@ fn shim_deny_unbound_mutate_in_source() {
 fn shim_deny_worktree_management() {
     let src = include_str!("../src/main.rs");
     assert!(
-        src.contains("fleet-managed"),
+        src.contains("worktree lifecycle is session-managed"),
         "must deny worktree management"
     );
 }

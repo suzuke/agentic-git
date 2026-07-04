@@ -1253,7 +1253,11 @@ fn classify(
             }
         }
         // Worktree management: always deny (fleet-managed).
-        "worktree" => Action::Deny("fleet-managed — use agend-terminal worktree tools".into()),
+        "worktree" => Action::Deny(
+            "worktree lifecycle is session-managed — use `agentic-git run` (or your \
+             orchestrator's worktree tool), not raw `git worktree`"
+                .into(),
+        ),
         // #1511 follow-up: index/ref-mutating plumbing that also fell to the
         // `_` default arm (unbound → Passthrough, so an unbound agent in
         // canonical could mutate the shared store). Unlike read-tree/
@@ -2469,13 +2473,21 @@ fn deny_remedy_lines(binding: Option<&Binding>) -> Vec<String> {
                 ),
             ]
         }
-        // Unbound / partial binding / no binding in scope: point at how to get one.
+        // Unbound / partial binding / no binding in scope: point at how to get
+        // one. Tool-agnostic (P3): lead with agentic-git's OWN standalone path,
+        // then the orchestrator-generic line — an agend-fleet agent still knows
+        // its provisioning tool from its own prompt; a standalone user gets a
+        // literal command. No orchestrator-specific vocab hardcoded here.
         _ => vec![
-            "           you have no active worktree binding here:".to_string(),
-            "             - if the daemon auto-bound one for this task, check `binding_state` and cd into it"
+            "           no active worktree binding here — this git call isn't inside a"
                 .to_string(),
-            "             - otherwise get one via the task board, `repo action=checkout bind=true`, or `bind_self`"
+            "           guarded session. Get one by either:".to_string(),
+            "             - launching the agent via `agentic-git run --branch <branch> -- <cmd>`"
                 .to_string(),
+            "               (standalone: provisions + binds a worktree), or".to_string(),
+            "             - having your orchestrator bind this agent to a worktree,"
+                .to_string(),
+            "               then running git from inside it.".to_string(),
         ],
     }
 }

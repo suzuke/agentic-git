@@ -1,5 +1,7 @@
 # agentic-git
 
+[![ci](https://github.com/suzuke/agentic-git/actions/workflows/ci.yml/badge.svg)](https://github.com/suzuke/agentic-git/actions/workflows/ci.yml)
+
 **A guarded, transparent `git` for AI coding agents.**
 
 `agentic-git` is a small Rust binary that masquerades as `git` on an agent's

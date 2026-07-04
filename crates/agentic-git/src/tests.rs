@@ -444,24 +444,31 @@ fn deny_message_names_bound_worktree_2379() {
 
 /// #2379 ②: an UNBOUND caller (empty binding) and a no-binding deny (`None`,
 /// the early canonical-bypass path) both get the SAME generic "get a worktree"
-/// remedy via the shared builder.
+/// remedy via the shared builder. P3: the remedy is TOOL-AGNOSTIC — it names
+/// agentic-git's own standalone path and a generic orchestrator line, with NO
+/// orchestrator-specific MCP vocab.
 #[test]
 fn deny_message_unbound_points_at_getting_a_worktree_2379() {
     let empty = Binding::default();
     for binding in [Some(&empty), None] {
         let joined = format_deny_error("commit", "unbound", "dev", binding).join("\n");
         assert!(
-            joined.contains("binding_state"),
-            "unbound remedy must mention binding_state, got:\n{joined}"
+            joined.contains("agentic-git run"),
+            "unbound remedy must name the standalone `agentic-git run` path, got:\n{joined}"
         );
         assert!(
-            joined.contains("bind_self") || joined.contains("repo action=checkout"),
-            "unbound remedy must point at provisioning a worktree, got:\n{joined}"
+            joined.contains("orchestrator"),
+            "unbound remedy must offer the orchestrator-bound path too, got:\n{joined}"
+        );
+        // P3: no orchestrator-specific MCP vocab leaks into the tool's own voice.
+        assert!(
+            !joined.contains("binding_state") && !joined.contains("bind_self"),
+            "remedy must not hardcode agend MCP vocab, got:\n{joined}"
         );
     }
     // The shared builder is what the canonical-bypass deny (no Binding) reuses.
     assert!(
-        deny_remedy_lines(None).join("\n").contains("binding_state"),
+        deny_remedy_lines(None).join("\n").contains("agentic-git run"),
         "the shared remedy builder serves the no-binding deny too"
     );
 }
@@ -519,7 +526,7 @@ fn deny_remedy_partial_binding_uses_generic_not_stale_path_2379() {
              name it as 'your assigned worktree' (would contradict the deny):\n{joined}"
     );
     assert!(
-        joined.contains("binding_state") || joined.contains("bind_self"),
+        joined.contains("agentic-git run"),
         "partial binding must fall through to the generic 'get a worktree' remedy:\n{joined}"
     );
 }

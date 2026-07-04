@@ -1,4 +1,4 @@
-//! agend-git — transparent git shim for fleet-managed worktrees.
+//! agentic-git — transparent git shim for fleet-managed worktrees.
 //!
 //! Intercepts git commands via PATH shadowing. Reads binding.json to
 //! determine the active worktree, then either:
@@ -7,7 +7,7 @@
 //! - silent-exempt (gh post-merge cleanup checkout — Sprint 57 Wave 2 Track D)
 //! - deny (forbidden operations with LLM-friendly error)
 //!
-//! Bypass: AGEND_GIT_BYPASS=1 | AGEND_GIT_BYPASS_AGENT=<name> | AGEND_GIT_BYPASS_UNTIL=<epoch>
+//! Bypass: AGENTIC_GIT_BYPASS=1 | AGENTIC_GIT_BYPASS_AGENT=<name> | AGENTIC_GIT_BYPASS_UNTIL=<epoch>
 //!
 //! Cross-platform: Unix uses exec() for process replacement; Windows uses
 //! status() + exit(code) for equivalent behavior.
@@ -17,27 +17,52 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-// #1651: share the EXACT HMAC verifier with the daemon by source (the shim is a
-// separate binary that cannot link the lib). `config_integrity` declares the
-// same file as `mod integrity_core`; this `#[path]` include guarantees no
-// signer/verifier algorithm drift.
-#[path = "../integrity_core.rs"]
-mod integrity_core;
-
-// #2550 W4: share the EXACT protected-ref predicate with the daemon lib by
-// source (same precedent as `integrity_core` above) — closes the manual-sync
-// gap the local mirror's doc comment used to warn about.
-#[path = "../protected_refs.rs"]
-mod protected_refs;
+// Contract modules (binding HMAC verifier #1651, protected-ref predicate
+// #2550 W4) live in the `agentic-git-core` crate so any embedding system —
+// this binary, a daemon, tests — links the EXACT same verifier/predicate
+// source and no signer/verifier or ref-set drift is possible.
+use agentic_git_core::{integrity_core, protected_refs};
 
 /// #1504 L3: max times the shim may re-enter before hard-failing. Healthy
 /// operation never exceeds 1 (real git ≠ shim → no re-entry), so a small cap
 /// has zero false-trip risk while containing a self-resolution spawn storm.
 const MAX_SHIM_DEPTH: u32 = 3;
 
+/// Legacy (agend-terminal) name for a given `AGENTIC_GIT_*` env var, if any.
+/// The shim was extracted from agend-terminal's `agend-git`; it keeps reading
+/// the legacy names as a fallback so an existing fleet can adopt this binary
+/// with zero daemon-side changes.
+fn legacy_env_name(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "AGENTIC_GIT_HOME" => "AGEND_HOME",
+        "AGENTIC_GIT_AGENT" => "AGEND_INSTANCE_NAME",
+        "AGENTIC_GIT_REAL_GIT" => "AGEND_REAL_GIT",
+        "AGENTIC_GIT_BYPASS" => "AGEND_GIT_BYPASS",
+        "AGENTIC_GIT_BYPASS_AGENT" => "AGEND_GIT_BYPASS_AGENT",
+        "AGENTIC_GIT_BYPASS_UNTIL" => "AGEND_GIT_BYPASS_UNTIL",
+        "AGENTIC_GIT_SHIM_DEPTH" => "AGEND_GIT_SHIM_DEPTH",
+        "AGENTIC_GIT_ALLOW_CANONICAL_MUTATE" => "AGEND_GIT_ALLOW_CANONICAL_MUTATE",
+        _ => return None,
+    })
+}
+
+/// `env::var` with the primary `AGENTIC_GIT_*` name, falling back to the
+/// legacy `AGEND_*` name (see [`legacy_env_name`]).
+fn env_compat(name: &str) -> Result<String, env::VarError> {
+    env::var(name).or_else(|e| match legacy_env_name(name) {
+        Some(old) => env::var(old),
+        None => Err(e),
+    })
+}
+
+/// `env::var_os` variant of [`env_compat`].
+fn env_compat_os(name: &str) -> Option<std::ffi::OsString> {
+    env::var_os(name).or_else(|| legacy_env_name(name).and_then(env::var_os))
+}
+
 /// Current shim recursion depth, read from the propagated sentinel env.
 fn shim_depth() -> u32 {
-    env::var("AGEND_GIT_SHIM_DEPTH")
+    env_compat("AGENTIC_GIT_SHIM_DEPTH")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0)
@@ -47,7 +72,7 @@ fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
 
     // #1504 L3: recursion guard. If git ever resolves back to THIS shim (e.g.
-    // AGEND_REAL_GIT unset + self-exclusion miss), each real-git spawn re-enters
+    // AGENTIC_GIT_REAL_GIT unset + self-exclusion miss), each real-git spawn re-enters
     // here; on Windows `exec_real_git` uses `status()` (spawn), so it's an
     // unbounded process storm, not a single exec-replace. Cap the depth and
     // hard-fail with an actionable message. Checked BEFORE `should_bypass`
@@ -55,9 +80,9 @@ fn main() {
     let depth = shim_depth();
     if depth >= MAX_SHIM_DEPTH {
         eprintln!(
-            "agend-git: FATAL recursion guard tripped (AGEND_GIT_SHIM_DEPTH={depth}) — the \
-             shim resolved git to itself. AGEND_REAL_GIT is unset/unresolvable and \
-             $AGEND_HOME/bin was not excluded from PATH. Set AGEND_REAL_GIT to the real \
+            "agentic-git: FATAL recursion guard tripped (AGENTIC_GIT_SHIM_DEPTH={depth}) — the \
+             shim resolved git to itself. AGENTIC_GIT_REAL_GIT is unset/unresolvable and \
+             $AGENTIC_GIT_HOME/bin was not excluded from PATH. Set AGENTIC_GIT_REAL_GIT to the real \
              git binary. (#1504)"
         );
         std::process::exit(70); // EX_SOFTWARE
@@ -65,7 +90,7 @@ fn main() {
 
     // Bypass checks (3-layer per §7).
     if should_bypass() {
-        // #2158: audit a SUB-AGENT's own `AGEND_GIT_BYPASS=1 git <mutating>` op —
+        // #2158: audit a SUB-AGENT's own `AGENTIC_GIT_BYPASS=1 git <mutating>` op —
         // the stray-worktree / drift vector the daemon-side bypass audit
         // (git_helpers.rs, #2242 PR2(iii)) cannot see. The shim is a SEPARATE
         // binary on the AGENT PATH; the daemon PATH is shim-free, so the two audits
@@ -77,9 +102,9 @@ fn main() {
         if shim_depth() == 0 {
             let subcommand = args.first().map(|s| s.as_str()).unwrap_or("");
             if bypass_op_is_audited(subcommand, &args) {
-                let home = env::var("AGEND_HOME").unwrap_or_default();
+                let home = env_compat("AGENTIC_GIT_HOME").unwrap_or_default();
                 if !home.is_empty() {
-                    let agent = env::var("AGEND_INSTANCE_NAME").unwrap_or_default();
+                    let agent = env_compat("AGENTIC_GIT_AGENT").unwrap_or_default();
                     // instrument-only: D3 #2158 — bypass audit emit, control-flow-
                     // inert; the `exec_real_git` below is unchanged.
                     log_bypass_mutating_op(&home, &agent, &args);
@@ -90,25 +115,25 @@ fn main() {
             // at dispatch; a stray bypass `worktree add` / `checkout|switch <ref>`
             // here detaches the operator's canonical HEAD (or strays a worktree).
             // Daemon internals never reach this shim (daemon PATH is shim-free) and
-            // carry no AGEND_INSTANCE_NAME, so this only bites true agents. Exits
+            // carry no AGENTIC_GIT_AGENT, so this only bites true agents. Exits
             // non-zero before the passthrough exec when the deny fires.
             enforce_agent_canonical_bypass_deny(&args);
         }
         exec_real_git(&args, None);
     }
 
-    let agent = env::var("AGEND_INSTANCE_NAME").unwrap_or_default();
-    let home = env::var("AGEND_HOME").unwrap_or_default();
+    let agent = env_compat("AGENTIC_GIT_AGENT").unwrap_or_default();
+    let home = env_compat("AGENTIC_GIT_HOME").unwrap_or_default();
 
     if agent.is_empty() || home.is_empty() {
-        // #2234 defect#2: a NON-agent caller (no AGEND_INSTANCE_NAME) early-exits
+        // #2234 defect#2: a NON-agent caller (no AGENTIC_GIT_AGENT) early-exits
         // here to the TERMINAL `exec_real_git` BEFORE reaching `classify` — so a
         // canonical-HEAD-touching `git checkout|switch <branch>` (e.g.
         // `git checkout origin/main`, which detaches canonical HEAD) passed
         // through with zero attribution. Record one fleet_events line with
         // process ancestry first (only when we have a home to write to — the
-        // daemon-correlated culprit inherits AGEND_HOME but dropped
-        // AGEND_INSTANCE_NAME). Instrument-only: the passthrough exec is unchanged.
+        // daemon-correlated culprit inherits AGENTIC_GIT_HOME but dropped
+        // AGENTIC_GIT_AGENT). Instrument-only: the passthrough exec is unchanged.
         if !home.is_empty() {
             // instrument-only: D3 #2234 — non-agent canonical-checkout audit,
             // control-flow-inert; the `exec_real_git` below is unchanged.
@@ -124,7 +149,7 @@ fn main() {
     // #2234: loud WARN for the cwd↔bound-worktree drift. When a bound agent's cwd
     // is its `<home>/workspace/<agent>` clone — a SEPARATE git object store from its
     // bound worktree — the shim routes git to the worktree (ChdirPass) while the
-    // agent's file edits / cargo / `AGEND_GIT_BYPASS=1 git` act on the clone, so git
+    // agent's file edits / cargo / `AGENTIC_GIT_BYPASS=1 git` act on the clone, so git
     // reads look "fake" (clean / already-merged) and the agent silently works
     // against a stale tree. Surface it with an ACTIONABLE recovery hint (stderr +
     // fleet_events) instead of corrupting the agent's git cognition. operator
@@ -140,7 +165,7 @@ fn main() {
     // commits. The RCA established these are produced by a backend process
     // (committer = user's global git identity, because this shim's
     // `commit → ChdirPass` does NOT inject `-c user.*`; agend's own init
-    // bypasses via AGEND_GIT_BYPASS and never reaches here). Desk research
+    // bypasses via AGENTIC_GIT_BYPASS and never reaches here). Desk research
     // could not isolate WHICH backend / process; this hook records the full
     // process ancestry + invocation context the instant the shim sees the
     // heartbeat-shaped commit, so the next live occurrence is pinned. Pure
@@ -163,11 +188,11 @@ fn main() {
     let canonical_cwd = cwd_is_canonical_rooted();
 
     // #852: resolve agent-vs-operator caller identity once. Agents are
-    // daemon-spawned subprocesses (AGEND_INSTANCE_NAME set); operators
+    // daemon-spawned subprocesses (AGENTIC_GIT_AGENT set); operators
     // are interactive shells with no such env. Used by classify's
     // canonical-checkout gate to prevent reviewer-style PR-inspection
     // from polluting canonical worktrees with stale refs.
-    let is_agent_caller = env::var_os("AGEND_INSTANCE_NAME").is_some();
+    let is_agent_caller = env_compat_os("AGENTIC_GIT_AGENT").is_some();
 
     // #1463 (A): a bound agent's mutating command whose cwd is a FOREIGN git
     // repo (separate object store — e.g. a test scratch repo) should operate on
@@ -288,17 +313,17 @@ fn main() {
 // ── Bypass ──────────────────────────────────────────────────────────────
 
 fn should_bypass() -> bool {
-    if env::var("AGEND_GIT_BYPASS").is_ok() {
+    if env_compat("AGENTIC_GIT_BYPASS").is_ok() {
         return true;
     }
-    if let Ok(agent_bypass) = env::var("AGEND_GIT_BYPASS_AGENT") {
-        if let Ok(current) = env::var("AGEND_INSTANCE_NAME") {
+    if let Ok(agent_bypass) = env_compat("AGENTIC_GIT_BYPASS_AGENT") {
+        if let Ok(current) = env_compat("AGENTIC_GIT_AGENT") {
             if agent_bypass == current {
                 return true;
             }
         }
     }
-    if let Ok(until_str) = env::var("AGEND_GIT_BYPASS_UNTIL") {
+    if let Ok(until_str) = env_compat("AGENTIC_GIT_BYPASS_UNTIL") {
         if let Ok(until) = until_str.parse::<u64>() {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -397,11 +422,10 @@ enum Action {
 }
 
 // #2550 W4: the local mirror (a hand-copied `eq_ignore_ascii_case` literal
-// that "MUST stay in sync" with `agent_ops::is_protected_ref`) is gone —
-// `protected_refs::is_protected_ref` (the `#[path]`-included module above)
-// IS `agent_ops::is_protected_ref`'s exact source, so there is nothing left
-// to drift. Call sites below use `protected_refs::is_protected_ref` directly.
-use protected_refs::is_protected_ref;
+// that "MUST stay in sync" with the daemon's copy) is gone —
+// `protected_refs::is_protected_ref` (from `agentic-git-core`) IS the single
+// source, so there is nothing left to drift. Call sites use it directly.
+use agentic_git_core::protected_refs::is_protected_ref;
 
 /// #778 Option 3 (originally) + #852 residual PR-A: detect that cwd
 /// is rooted inside a canonical-origin git repo — either a
@@ -688,7 +712,7 @@ fn drift_warning_message(cwd: &Path, worktree: &Path) -> String {
     let cwd_d = cwd.display();
     let wt_d = worktree.display();
     format!(
-        "agend-git: \u{26a0} #2234 cwd/worktree drift — your cwd '{cwd_d}' is a \
+        "agentic-git: \u{26a0} #2234 cwd/worktree drift — your cwd '{cwd_d}' is a \
          SEPARATE git repo from your bound worktree '{wt_d}'. git (via this shim) \
          runs against the worktree, but file edits made with a cwd-relative path \
          land in THIS cwd clone where git can't see them — so reads look \
@@ -698,7 +722,7 @@ fn drift_warning_message(cwd: &Path, worktree: &Path) -> String {
          RECOVER: re-make those edits using ABSOLUTE paths under '{wt_d}', or copy \
          them across (`cp '{cwd_d}/<file>' '{wt_d}/<file>'`) — `cd` alone does NOT \
          move edits already written by absolute path. git already routes to the \
-         worktree; verify with  AGEND_GIT_BYPASS=1 git -C '{wt_d}' status"
+         worktree; verify with  AGENTIC_GIT_BYPASS=1 git -C '{wt_d}' status"
     )
 }
 
@@ -789,7 +813,7 @@ fn branch_tag_names_ref(subcmd: &str, args: &[String]) -> bool {
     })
 }
 
-/// #2158: which `AGEND_GIT_BYPASS=1 git <subcmd>` ops are worth auditing — Option B
+/// #2158: which `AGENTIC_GIT_BYPASS=1 git <subcmd>` ops are worth auditing — Option B
 /// (lead-chosen), the stray-worktree / drift / stray-tree-push vector. EXCLUDES
 /// `commit`/`add`: agents bypass-commit into their OWN worktree constantly, so
 /// logging those would flood fleet_events for ~zero forensic value (a bypass commit
@@ -808,11 +832,11 @@ fn bypass_op_is_audited(subcmd: &str, args: &[String]) -> bool {
 /// blanket env grant from a scoped/time-boxed one. Mirrors `should_bypass`'s
 /// precedence order; `"unknown"` only if the env changed between the two checks.
 fn active_bypass_layer() -> &'static str {
-    if env::var("AGEND_GIT_BYPASS").is_ok() {
+    if env_compat("AGENTIC_GIT_BYPASS").is_ok() {
         "env"
-    } else if env::var("AGEND_GIT_BYPASS_AGENT").is_ok() {
+    } else if env_compat("AGENTIC_GIT_BYPASS_AGENT").is_ok() {
         "agent"
-    } else if env::var("AGEND_GIT_BYPASS_UNTIL").is_ok() {
+    } else if env_compat("AGENTIC_GIT_BYPASS_UNTIL").is_ok() {
         "until"
     } else {
         "unknown"
@@ -1041,7 +1065,7 @@ fn classify(
         // `bound → ChdirPass` (routes to the agent's PRIVATE worktree index,
         // ignoring cwd — so a bound agent is safe even standing in canonical).
         // No canonical_cwd gate needed: ChdirPass already redirects away from
-        // cwd. Daemon-internal callers set `AGEND_GIT_BYPASS=1` and never reach
+        // cwd. Daemon-internal callers set `AGENTIC_GIT_BYPASS=1` and never reach
         // `classify`. Exact-match tokens — `read-tree` does NOT catch the
         // read-only `merge-tree`. `reset` stays here (it always required a
         // binding); `git reset --hard` remains the agent's self-recovery tool.
@@ -1208,7 +1232,7 @@ fn is_canonical_unbound_checkout_leniency(target_branch: &str, canonical_cwd: bo
 ///   - target is a protected ref (main / master)
 ///   - parent process is `gh` (signal that this invocation is from `gh pr
 ///     merge --delete-branch` post-merge local-state cleanup)
-///   - we're in the agent-invoked path (AGEND_INSTANCE_NAME was set; bound
+///   - we're in the agent-invoked path (AGENTIC_GIT_AGENT was set; bound
 ///     binding is the consequence of that)
 ///
 /// Heuristic robustness: a non-gh parent (interactive shell, script, IDE)
@@ -1220,20 +1244,20 @@ fn is_gh_post_merge_cleanup_checkout(target_branch: &str, parent_is_gh: bool) ->
 
 // ── Parent-process detection (gh post-merge cleanup heuristic) ──────────
 
-/// Sprint 57 Wave 2 Track D: detect that this `agend-git` invocation
-/// is a child of `gh`. Returns `true` only when AGEND_INSTANCE_NAME is
+/// Sprint 57 Wave 2 Track D: detect that this `agentic-git` invocation
+/// is a child of `gh`. Returns `true` only when AGENTIC_GIT_AGENT is
 /// set (i.e. we're inside the agent-invoked path the cross-branch
 /// fence guards) AND the parent process name is `gh`. Conservative
 /// by design: any platform-specific lookup failure returns `false`,
 /// letting the fence fire as it would have pre-Track-D rather than
 /// silently weakening E4.5.
 fn invocation_is_gh_post_merge() -> bool {
-    // Operator-shell invocations don't have AGEND_INSTANCE_NAME set;
+    // Operator-shell invocations don't have AGENTIC_GIT_AGENT set;
     // those already hit the early passthrough at the top of `main()`,
     // so the cross-branch fence never fires for them. Restricting the
-    // exemption to AGEND_INSTANCE_NAME-set invocations keeps the
+    // exemption to AGENTIC_GIT_AGENT-set invocations keeps the
     // surface tight.
-    if env::var("AGEND_INSTANCE_NAME")
+    if env_compat("AGENTIC_GIT_AGENT")
         .ok()
         .is_none_or(|s| s.is_empty())
     {
@@ -1417,13 +1441,13 @@ fn is_positional_branch_checkout(args: &[String]) -> bool {
 }
 
 /// #2234 fix B (pure decision — unit-testable without env/cwd/git). Should an
-/// agent's `AGEND_GIT_BYPASS` op be DENIED for canonical-repo safety?
+/// agent's `AGENTIC_GIT_BYPASS` op be DENIED for canonical-repo safety?
 ///
 /// Deny iff ALL hold:
-/// - `agent_present` — `AGEND_INSTANCE_NAME` set (a real fleet agent; daemon
+/// - `agent_present` — `AGENTIC_GIT_AGENT` set (a real fleet agent; daemon
 ///   internals never reach this shim and carry no instance name);
-/// - NOT `escape` — the one-shot `AGEND_GIT_ALLOW_CANONICAL_MUTATE` override is
-///   absent (deliberately a SEPARATE env from `AGEND_GIT_BYPASS`, which is what
+/// - NOT `escape` — the one-shot `AGENTIC_GIT_ALLOW_CANONICAL_MUTATE` override is
+///   absent (deliberately a SEPARATE env from `AGENTIC_GIT_BYPASS`, which is what
 ///   put us on the bypass path in the first place);
 /// - `canonical` — cwd is canonical-rooted (the source repo OR a worktree of it,
 ///   per `cwd_is_canonical_rooted`);
@@ -1465,8 +1489,8 @@ fn deny_agent_canonical_bypass(
 /// passthrough). No-op otherwise. Cross-platform — only env/args/cwd inspection
 /// (`cwd_is_canonical_rooted` already has macOS/Linux/Windows impls).
 fn enforce_agent_canonical_bypass_deny(args: &[String]) {
-    let agent = env::var("AGEND_INSTANCE_NAME").unwrap_or_default();
-    let escape = env::var("AGEND_GIT_ALLOW_CANONICAL_MUTATE").as_deref() == Ok("1");
+    let agent = env_compat("AGENTIC_GIT_AGENT").unwrap_or_default();
+    let escape = env_compat("AGENTIC_GIT_ALLOW_CANONICAL_MUTATE").as_deref() == Ok("1");
     // #2234 Patch A (r4): resolve the REAL subcommand through leading git globals
     // (`-C`, `-c`, `--git-dir`, …) so `git -C <canonical> worktree add` is judged
     // as `worktree add` — not the `-C` token (the `args.first()` blind spot) — AND
@@ -1490,7 +1514,7 @@ fn enforce_agent_canonical_bypass_deny(args: &[String]) {
     std::process::exit(1);
 }
 
-/// #2234 defect#2: record a NON-agent (no `AGEND_INSTANCE_NAME`) canonical-cwd
+/// #2234 defect#2: record a NON-agent (no `AGENTIC_GIT_AGENT`) canonical-cwd
 /// `checkout`/`switch <branch>` that the shim is about to pass through via the
 /// early-exit `exec_real_git` (it never reaches `classify`). These callers have
 /// no agent identity, so attribution relies entirely on PROCESS ANCESTRY — this
@@ -1535,7 +1559,7 @@ fn log_nonagent_canonical_checkout(home: &str, agent: &str, args: &[String]) {
         let _ = writeln!(f, "{event}");
     }
     eprintln!(
-        "[agend-git #2234] non-agent canonical-cwd {subcmd} passthrough (HEAD-touching): target={target_branch} ppid={ppid} cwd={cwd} ancestry={ancestry:?}"
+        "[agentic-git #2234] non-agent canonical-cwd {subcmd} passthrough (HEAD-touching): target={target_branch} ppid={ppid} cwd={cwd} ancestry={ancestry:?}"
     );
 }
 
@@ -1565,7 +1589,7 @@ fn build_bypass_audit_event(
     })
 }
 
-/// #2158: audit a SUB-AGENT's own `AGEND_GIT_BYPASS=1 git <mutating>` op — the
+/// #2158: audit a SUB-AGENT's own `AGENTIC_GIT_BYPASS=1 git <mutating>` op — the
 /// stray-worktree vector the daemon-side bypass audit (git_helpers.rs, #2242
 /// PR2(iii)) cannot see (it audits only the daemon's OWN bypass; the shim is the
 /// disjoint agent-side surface). Best-effort append to fleet_events.jsonl (the
@@ -1598,15 +1622,15 @@ fn log_bypass_mutating_op(home: &str, agent: &str, args: &[String]) {
         let _ = writeln!(f, "{event}");
     }
     eprintln!(
-        "[agend-git #2158] AGEND_GIT_BYPASS mutating {subcmd} (stray-worktree vector): ppid={ppid} cwd={cwd} ancestry={ancestry:?}"
+        "[agentic-git #2158] AGENTIC_GIT_BYPASS mutating {subcmd} (stray-worktree vector): ppid={ppid} cwd={cwd} ancestry={ancestry:?}"
     );
 }
 
 /// The git `user.email` that WOULD author/commit in `cwd` — i.e. the
 /// committer identity the heartbeat commit will carry. Invokes the real git
-/// (AGEND_REAL_GIT) to avoid recursing through this shim.
+/// (AGENTIC_GIT_REAL_GIT) to avoid recursing through this shim.
 fn effective_git_email(cwd: &str) -> Option<String> {
-    let real_git = env::var("AGEND_REAL_GIT").unwrap_or_else(|_| "git".to_string());
+    let real_git = env_compat("AGENTIC_GIT_REAL_GIT").unwrap_or_else(|_| "git".to_string());
     let out = std::process::Command::new(real_git)
         .args(["-C", cwd, "config", "user.email"])
         .output()
@@ -1650,7 +1674,7 @@ fn log_init_heartbeat_forensics(home: &str, agent: &str, args: &[String]) {
         let _ = writeln!(f, "{event}");
     }
     eprintln!(
-        "[agend-git #1463] init-heartbeat commit intercepted: agent={agent} email={email} ppid={ppid} cwd={cwd} ancestry={ancestry:?}"
+        "[agentic-git #1463] init-heartbeat commit intercepted: agent={agent} email={email} ppid={ppid} cwd={cwd} ancestry={ancestry:?}"
     );
 }
 
@@ -1682,19 +1706,19 @@ fn cleanup_init_pile_pre_push(worktree: &str) {
     let log_out = match Command::new("git")
         .args(["log", "origin/main..HEAD", "--format=%H %s"])
         .current_dir(worktree)
-        .env("AGEND_GIT_BYPASS", "1")
+        .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
         .output()
     {
         Ok(o) if o.status.success() => o,
         Ok(o) => {
             eprintln!(
-                "agend-git: #883 pre-push cleanup git log failed: {}",
+                "agentic-git: #883 pre-push cleanup git log failed: {}",
                 String::from_utf8_lossy(&o.stderr).trim()
             );
             return;
         }
         Err(e) => {
-            eprintln!("agend-git: #883 pre-push cleanup git log spawn failed: {e}");
+            eprintln!("agentic-git: #883 pre-push cleanup git log spawn failed: {e}");
             return;
         }
     };
@@ -1731,19 +1755,19 @@ fn cleanup_init_pile_pre_push(worktree: &str) {
         let reset = Command::new("git")
             .args(["reset", "--soft", "origin/main"])
             .current_dir(worktree)
-            .env("AGEND_GIT_BYPASS", "1")
+            .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
             .status();
         match reset {
             Ok(s) if s.success() => {
                 eprintln!(
-                    "agend-git: #883 pre-push cleanup soft-reset {total} empty init commit(s)"
+                    "agentic-git: #883 pre-push cleanup soft-reset {total} empty init commit(s)"
                 );
             }
             Ok(s) => {
-                eprintln!("agend-git: #883 pre-push cleanup soft-reset exited with status {s:?}");
+                eprintln!("agentic-git: #883 pre-push cleanup soft-reset exited with status {s:?}");
             }
             Err(e) => {
-                eprintln!("agend-git: #883 pre-push cleanup soft-reset spawn failed: {e}");
+                eprintln!("agentic-git: #883 pre-push cleanup soft-reset spawn failed: {e}");
             }
         }
         return;
@@ -1770,13 +1794,13 @@ fn cleanup_init_pile_pre_push(worktree: &str) {
     let rebase = Command::new("git")
         .args(["-c", "core.abbrev=7", "rebase", "-i", "origin/main"])
         .current_dir(worktree)
-        .env("AGEND_GIT_BYPASS", "1")
+        .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
         .env("GIT_SEQUENCE_EDITOR", format!("sed -i.bak '{sed_script}'"))
         .status();
     match rebase {
         Ok(s) if s.success() => {
             eprintln!(
-                "agend-git: #883 pre-push cleanup dropped {cleaned} empty init commit(s) via rebase"
+                "agentic-git: #883 pre-push cleanup dropped {cleaned} empty init commit(s) via rebase"
             );
         }
         _ => {
@@ -1787,10 +1811,10 @@ fn cleanup_init_pile_pre_push(worktree: &str) {
             let _abort = Command::new("git")
                 .args(["rebase", "--abort"])
                 .current_dir(worktree)
-                .env("AGEND_GIT_BYPASS", "1")
+                .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
                 .status();
             eprintln!(
-                "agend-git: #883 pre-push cleanup rebase failed; aborted to leave worktree clean. \
+                "agentic-git: #883 pre-push cleanup rebase failed; aborted to leave worktree clean. \
                  Push proceeds with init pile intact ({cleaned} inits remain)."
             );
         }
@@ -1805,7 +1829,7 @@ fn is_heartbeat_subject_shim(subject: &str) -> bool {
 }
 
 /// Verify the commit at `hash` is a true empty heartbeat: empty body
-/// (modulo `Agend-*` trailer keys from the prepare-commit-msg hook) AND
+/// (modulo `Agentic-*` trailer keys from the prepare-commit-msg hook) AND
 /// zero file changes. Either check failing → not eligible for soft-
 /// reset cleanup.
 ///
@@ -1818,7 +1842,7 @@ fn commit_is_empty_heartbeat(worktree: &str, hash: &str) -> bool {
     let body_out = match Command::new("git")
         .args(["log", "-1", "--format=%b", hash])
         .current_dir(worktree)
-        .env("AGEND_GIT_BYPASS", "1")
+        .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
         .output()
     {
         Ok(o) if o.status.success() => o,
@@ -1830,15 +1854,15 @@ fn commit_is_empty_heartbeat(worktree: &str, hash: &str) -> bool {
         if trimmed.is_empty() {
             continue;
         }
-        // Tolerate the four `Agend-*` trailer keys the prepare-commit-msg
-        // hook injects (`Agend-Agent`, `Agend-Task`, `Agend-Branch`,
-        // `Agend-Issued-At` — per `dispatch_hook/mod.rs:979`). Anything
+        // Tolerate the four `Agentic-*` trailer keys the prepare-commit-msg
+        // hook injects (`Agentic-Agent`, `Agentic-Task`, `Agentic-Branch`,
+        // `Agentic-Issued-At` — per `dispatch_hook/mod.rs:979`). Anything
         // else means there's a real commit message body → not a
         // heartbeat.
-        if trimmed.starts_with("Agend-Agent:")
-            || trimmed.starts_with("Agend-Task:")
-            || trimmed.starts_with("Agend-Branch:")
-            || trimmed.starts_with("Agend-Issued-At:")
+        if trimmed.starts_with("Agentic-Agent:")
+            || trimmed.starts_with("Agentic-Task:")
+            || trimmed.starts_with("Agentic-Branch:")
+            || trimmed.starts_with("Agentic-Issued-At:")
         {
             continue;
         }
@@ -1849,7 +1873,7 @@ fn commit_is_empty_heartbeat(worktree: &str, hash: &str) -> bool {
     let diff_out = match Command::new("git")
         .args(["diff-tree", "--no-commit-id", "--name-only", "-r", hash])
         .current_dir(worktree)
-        .env("AGEND_GIT_BYPASS", "1")
+        .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
         .output()
     {
         Ok(o) if o.status.success() => o,
@@ -1861,7 +1885,7 @@ fn commit_is_empty_heartbeat(worktree: &str, hash: &str) -> bool {
 // ── #2379 ③ denylist-core: trust-root push deny ─────────────────────────
 
 /// Trust-root filenames an agent must never push into a shared repo. These live
-/// in `$AGEND_HOME` (the config-integrity key, the fleet config, the append-only
+/// in `$AGENTIC_GIT_HOME` (the config-integrity key, the fleet config, the append-only
 /// audit logs); `.gitignore` blocks the common ones but `git add -f` bypasses it,
 /// so this denylist is the push-time enforcement layer. Matched against a blob's
 /// repo-relative BASENAME / extension (see `trust_root_basename_denied`).
@@ -1871,9 +1895,9 @@ const TRUST_ROOT_DENY_NAMES: &[&str] = &[".config-integrity-key", "policy.toml",
 /// exact trust-root name, or it is an audit log (`*.jsonl`). Pure — fed by the
 /// impure range enumeration.
 ///
-/// ⚠ Matches the repo-relative path's basename, NOT a `$AGEND_HOME` filesystem
-/// prefix: a managed worktree lives UNDER `$AGEND_HOME/worktrees/<agent>/<branch>`
-/// (binding.rs), so an abs-path-under-`$AGEND_HOME` test would match EVERY file in
+/// ⚠ Matches the repo-relative path's basename, NOT a `$AGENTIC_GIT_HOME` filesystem
+/// prefix: a managed worktree lives UNDER `$AGENTIC_GIT_HOME/worktrees/<agent>/<branch>`
+/// (binding.rs), so an abs-path-under-`$AGENTIC_GIT_HOME` test would match EVERY file in
 /// the worktree and false-block every push. `git --name-only` yields repo-relative
 /// paths, so basename matching is correct. Basename via `rsplit('/')` (NOT
 /// `lstrip`/`trim_start_matches`, which would eat the leading dot of
@@ -1891,7 +1915,7 @@ fn trust_root_basename_denied(repo_relative_path: &str) -> bool {
 /// (`origin/main..HEAD`) — the union of `--name-only` across the range, so a
 /// trust-root blob added in an intermediate commit is caught even if a later
 /// commit deletes it (the blob is still in the pushed history). Runs real git in
-/// the worktree with `AGEND_GIT_BYPASS=1` (mirrors `cleanup_init_pile_pre_push`'s
+/// the worktree with `AGENTIC_GIT_BYPASS=1` (mirrors `cleanup_init_pile_pre_push`'s
 /// established range base). Returns `Err(msg)` when the range can't be computed
 /// (e.g. `origin/main` not fetched) so the caller can fail CLOSED.
 fn push_range_files(worktree: &str) -> Result<Vec<String>, String> {
@@ -1903,7 +1927,7 @@ fn push_range_files(worktree: &str) -> Result<Vec<String>, String> {
             "origin/main..HEAD",
         ])
         .current_dir(worktree)
-        .env("AGEND_GIT_BYPASS", "1")
+        .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
         .output()
         .map_err(|e| format!("git log spawn failed: {e}"))?;
     if !out.status.success() {
@@ -1935,7 +1959,7 @@ fn push_trust_root_denylist_violation(worktree: &str) -> Option<String> {
             .find(|p| trust_root_basename_denied(p))
             .map(|p| {
                 format!(
-                    "push range contains a trust-root file: `{p}` — $AGEND_HOME config / \
+                    "push range contains a trust-root file: `{p}` — $AGENTIC_GIT_HOME config / \
                      integrity key / audit logs must never be pushed into a shared repo. \
                      Drop it from the pushed commits (e.g. `git rm --cached {p}` then amend/rebase) \
                      and retry."
@@ -1955,7 +1979,7 @@ fn push_trust_root_denylist_violation(worktree: &str) -> Option<String> {
 /// (`protected_refs::PROTECTED_REFS` — #2550 W4: was its own hand-copied
 /// `HARDCODE_PROTECTED_REFS` const here, now the shared list an operator
 /// override can only ADD to, tighten-only, never shrink) PLUS the operator's
-/// `$AGEND_HOME/policy.toml` `protected_refs` override — but ONLY when the
+/// `$AGENTIC_GIT_HOME/policy.toml` `protected_refs` override — but ONLY when the
 /// file is present, HMAC-verified (hygiene, mirrors `read_binding`'s
 /// sidecar), and parses. **Fail-closed, never less safe than the hardcode
 /// floor:**
@@ -2134,7 +2158,7 @@ fn has_explicit_refspec(args: &[String]) -> bool {
 fn push_default_is_matching(worktree: &str) -> bool {
     let git = resolve_real_git();
     Command::new(&git)
-        .env("AGEND_GIT_SHIM_DEPTH", (shim_depth() + 1).to_string())
+        .env("AGENTIC_GIT_SHIM_DEPTH", (shim_depth() + 1).to_string())
         .args(["-C", worktree, "config", "--get", "push.default"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "matching")
@@ -2154,7 +2178,7 @@ fn exec_with_conflict_guidance(
     // #1504 L3: propagate incremented depth (rebase/merge/pull/cherry-pick reach
     // here and also spawn real git — same recursion vector as exec_real_git).
     let status = Command::new(&git)
-        .env("AGEND_GIT_SHIM_DEPTH", (shim_depth() + 1).to_string())
+        .env("AGENTIC_GIT_SHIM_DEPTH", (shim_depth() + 1).to_string())
         .arg("-C")
         .arg(worktree)
         .args(args)
@@ -2174,7 +2198,7 @@ fn exec_with_conflict_guidance(
             std::process::exit(st.code().unwrap_or(1))
         }
         Err(e) => {
-            eprintln!("agend-git: exec failed: {e}");
+            eprintln!("agentic-git: exec failed: {e}");
             std::process::exit(127);
         }
     }
@@ -2185,7 +2209,7 @@ fn exec_real_git(args: &[String], chdir: Option<&str>) -> ! {
     let mut cmd = Command::new(&git);
     // #1504 L3: propagate the incremented depth so a self-resolution loop trips
     // the recursion guard at the next entry instead of spawning unbounded.
-    cmd.env("AGEND_GIT_SHIM_DEPTH", (shim_depth() + 1).to_string());
+    cmd.env("AGENTIC_GIT_SHIM_DEPTH", (shim_depth() + 1).to_string());
     if let Some(dir) = chdir {
         cmd.arg("-C").arg(dir);
     }
@@ -2196,7 +2220,7 @@ fn exec_real_git(args: &[String], chdir: Option<&str>) -> ! {
     {
         use std::os::unix::process::CommandExt;
         let err = cmd.exec();
-        eprintln!("agend-git: exec failed: {err}");
+        eprintln!("agentic-git: exec failed: {err}");
         std::process::exit(127);
     }
     #[cfg(not(unix))]
@@ -2204,7 +2228,7 @@ fn exec_real_git(args: &[String], chdir: Option<&str>) -> ! {
         match cmd.status() {
             Ok(status) => std::process::exit(status.code().unwrap_or(1)),
             Err(e) => {
-                eprintln!("agend-git: exec failed: {e}");
+                eprintln!("agentic-git: exec failed: {e}");
                 std::process::exit(127);
             }
         }
@@ -2212,22 +2236,22 @@ fn exec_real_git(args: &[String], chdir: Option<&str>) -> ! {
 }
 
 fn resolve_real_git() -> String {
-    // Priority 1: AGEND_REAL_GIT env (injected by daemon at spawn).
-    if let Ok(path) = env::var("AGEND_REAL_GIT") {
+    // Priority 1: AGENTIC_GIT_REAL_GIT env (injected by daemon at spawn).
+    if let Ok(path) = env_compat("AGENTIC_GIT_REAL_GIT") {
         if !path.is_empty() && std::path::Path::new(&path).exists() {
             return path;
         }
     }
-    // Priority 2: which excluding $AGEND_HOME/bin/ (the shim dir).
+    // Priority 2: which excluding $AGENTIC_GIT_HOME/bin/ (the shim dir).
     // #1504 L2: exclude via canonicalized Path comparison, not a string compare.
     // `format!("{h}/bin")` (forward slash) never matched a Windows PATH entry
     // (backslash / case / trailing-slash), so the shim failed to exclude itself
     // and `which_in` resolved git back to THIS binary → recursive-spawn storm.
-    // With L1 fixed the daemon injects AGEND_REAL_GIT and Priority 1 above
+    // With L1 fixed the daemon injects AGENTIC_GIT_REAL_GIT and Priority 1 above
     // short-circuits, so this fallback rarely runs — but it must be correct when
     // it does. `split_paths` also gives the right separator + drive-colon handling.
     let agend_bin: Option<PathBuf> =
-        env::var_os("AGEND_HOME").map(|h| PathBuf::from(h).join("bin"));
+        env_compat_os("AGENTIC_GIT_HOME").map(|h| PathBuf::from(h).join("bin"));
     let path_os = env::var_os("PATH").unwrap_or_default();
     let search_paths: Vec<PathBuf> = std::env::split_paths(&path_os)
         .filter(|p| !p.as_os_str().is_empty())
@@ -2241,7 +2265,7 @@ fn resolve_real_git() -> String {
 
 /// #1504: directory equality via `canonicalize` (resolves slash form, case-folds
 /// on Windows NTFS, follows symlinks), with a lexical fallback when a path can't
-/// be canonicalized (e.g. `$AGEND_HOME/bin` not yet created). NEVER unwraps
+/// be canonicalized (e.g. `$AGENTIC_GIT_HOME/bin` not yet created). NEVER unwraps
 /// `canonicalize` — it `Err`s on missing paths.
 fn same_dir(a: &std::path::Path, b: Option<&std::path::Path>) -> bool {
     let Some(b) = b else { return false };
@@ -2315,7 +2339,7 @@ fn deny_remedy_lines(binding: Option<&Binding>) -> Vec<String> {
 }
 
 /// #2379 ② (r6): the canonical-bypass deny block as a testable `Vec<String>`.
-/// The header + the canonical-specific `AGEND_GIT_ALLOW_CANONICAL_MUTATE` bypass
+/// The header + the canonical-specific `AGENTIC_GIT_ALLOW_CANONICAL_MUTATE` bypass
 /// are unique to this early deny (no `Binding` is loaded — env+cwd only, so the
 /// generic [`deny_remedy_lines`]`(None)` remedy is used). Extracted from the
 /// inline `eprintln!`s so the no-"security"-wording meta-test covers this prose
@@ -2323,14 +2347,14 @@ fn deny_remedy_lines(binding: Option<&Binding>) -> Vec<String> {
 fn format_canonical_bypass_deny(agent: &str, sub: &str) -> Vec<String> {
     let mut lines = vec![
         format!(
-            "agend-git: DENIED — agent '{agent}' must not bypass-{sub} in a canonical-rooted repo."
+            "agentic-git: DENIED — agent '{agent}' must not bypass-{sub} in a canonical-rooted repo."
         ),
         "           a stray provision here detaches the operator's canonical HEAD (#2234)."
             .to_string(),
     ];
     lines.extend(deny_remedy_lines(None));
     lines.push(
-        "           or, if you genuinely must: set AGEND_GIT_ALLOW_CANONICAL_MUTATE=1 for a one-shot (or ask lead)."
+        "           or, if you genuinely must: set AGENTIC_GIT_ALLOW_CANONICAL_MUTATE=1 for a one-shot (or ask lead)."
             .to_string(),
     );
     lines
@@ -2354,20 +2378,20 @@ fn format_deny_error(
     binding: Option<&Binding>,
 ) -> Vec<String> {
     let mut lines = vec![
-        format!("agend-git: ERROR git {subcmd} denied"),
+        format!("agentic-git: ERROR git {subcmd} denied"),
         format!("           agent={agent}, reason: {reason}"),
     ];
     lines.extend(deny_remedy_lines(binding));
     lines.push("           or bypass with one of:".to_string());
     lines.push(
-        "             AGEND_GIT_BYPASS=1               one-shot emergency override".to_string(),
+        "             AGENTIC_GIT_BYPASS=1               one-shot emergency override".to_string(),
     );
     lines.push(
-        "             AGEND_GIT_BYPASS_AGENT=<name>    agent-specific exemption (matches AGEND_INSTANCE_NAME)"
+        "             AGENTIC_GIT_BYPASS_AGENT=<name>    agent-specific exemption (matches AGENTIC_GIT_AGENT)"
             .to_string(),
     );
     lines.push(
-        "             AGEND_GIT_BYPASS_UNTIL=<epoch>   time-limited exemption (Unix seconds, not ISO)"
+        "             AGENTIC_GIT_BYPASS_UNTIL=<epoch>   time-limited exemption (Unix seconds, not ISO)"
             .to_string(),
     );
     lines
@@ -2494,5 +2518,4 @@ fn format_conflict_guidance() -> &'static str {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-#[path = "agend-git/tests.rs"]
 mod tests;

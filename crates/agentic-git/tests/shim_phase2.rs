@@ -1,4 +1,4 @@
-//! agend-git-shim Phase 2 invariant + stress tests.
+//! agentic-git-shim Phase 2 invariant + stress tests.
 
 use std::time::{Duration, Instant};
 
@@ -34,47 +34,47 @@ fn unbind_idempotent() {
 
 #[test]
 fn shim_binary_compiles() {
-    // #1784: prove the agend-git bin builds + runs via the PREBUILT artifact.
+    // #1784: prove the agentic-git bin builds + runs via the PREBUILT artifact.
     // cargo builds it before this integration test and exposes its path as
-    // CARGO_BIN_EXE_agend-git; running `--version` proves it compiled and
+    // CARGO_BIN_EXE_agentic-git; running `--version` proves it compiled and
     // is runnable.
     //
-    // Previously this spawned a NESTED `cargo build --bin agend-git`, which
+    // Previously this spawned a NESTED `cargo build --bin agentic-git`, which
     // contends on the cargo/`target` lock held by the outer test runner: merely
     // slow (~38s) on unix (advisory locks), but an intermittent DEADLOCK on windows
     // (mandatory file locks / AV scanning the .exe write) — the fleet-wide ~56-min
     // windows-CI hang that reddened main HEAD itself. The prebuilt binary has no
     // nested-cargo target-lock contention; the build was also redundant (the
     // workspace build + test harness already compile every bin).
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_agend-git"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_agentic-git"))
         .arg("--version")
         .output()
-        .expect("run agend-git --version");
+        .expect("run agentic-git --version");
     assert!(
         out.status.code().is_some(),
-        "agend-git must compile and run to completion; stderr={}",
+        "agentic-git must compile and run to completion; stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
 
 #[test]
 fn shim_bypass_global_env() {
-    // AGEND_GIT_BYPASS=1 → shim should passthrough (tested via source inspection).
-    let src = include_str!("../src/bin/agend-git.rs");
-    assert!(src.contains("AGEND_GIT_BYPASS"), "must check bypass env");
+    // AGENTIC_GIT_BYPASS=1 → shim should passthrough (tested via source inspection).
+    let src = include_str!("../src/main.rs");
+    assert!(src.contains("AGENTIC_GIT_BYPASS"), "must check bypass env");
     assert!(
-        src.contains("AGEND_GIT_BYPASS_AGENT"),
+        src.contains("AGENTIC_GIT_BYPASS_AGENT"),
         "must check per-agent bypass"
     );
     assert!(
-        src.contains("AGEND_GIT_BYPASS_UNTIL"),
+        src.contains("AGENTIC_GIT_BYPASS_UNTIL"),
         "must check TTL bypass"
     );
 }
 
 #[test]
 fn shim_deny_cross_branch_in_source() {
-    let src = include_str!("../src/bin/agend-git.rs");
+    let src = include_str!("../src/main.rs");
     assert!(
         src.contains("cross-branch"),
         "must deny cross-branch checkout"
@@ -83,13 +83,13 @@ fn shim_deny_cross_branch_in_source() {
 
 #[test]
 fn shim_deny_unbound_mutate_in_source() {
-    let src = include_str!("../src/bin/agend-git.rs");
+    let src = include_str!("../src/main.rs");
     assert!(src.contains("unbound"), "must deny unbound mutate");
 }
 
 #[test]
 fn shim_deny_worktree_management() {
-    let src = include_str!("../src/bin/agend-git.rs");
+    let src = include_str!("../src/main.rs");
     assert!(
         src.contains("fleet-managed"),
         "must deny worktree management"
@@ -98,7 +98,7 @@ fn shim_deny_worktree_management() {
 
 #[test]
 fn shim_writes_git_event_on_deny() {
-    let src = include_str!("../src/bin/agend-git.rs");
+    let src = include_str!("../src/main.rs");
     assert!(
         src.contains("fleet_events.jsonl"),
         "must write git_event on deny"
@@ -111,39 +111,39 @@ fn shim_writes_git_event_on_deny() {
 
 #[test]
 fn shim_uses_agend_real_git_env_first() {
-    let src = include_str!("../src/bin/agend-git.rs");
+    let src = include_str!("../src/main.rs");
     assert!(
-        src.contains("AGEND_REAL_GIT"),
-        "must read AGEND_REAL_GIT first"
+        src.contains("AGENTIC_GIT_REAL_GIT"),
+        "must read AGENTIC_GIT_REAL_GIT first"
     );
     // Verify priority order: env check before which fallback.
-    let env_pos = src.find("AGEND_REAL_GIT").expect("env ref");
+    let env_pos = src.find("AGENTIC_GIT_REAL_GIT").expect("env ref");
     let which_pos = src.find("which_in").expect("which fallback");
     assert!(
         env_pos < which_pos,
-        "AGEND_REAL_GIT must be checked before which_in"
+        "AGENTIC_GIT_REAL_GIT must be checked before which_in"
     );
 }
 
 #[test]
 fn shim_excludes_agend_bin_from_which() {
-    let src = include_str!("../src/bin/agend-git.rs");
+    let src = include_str!("../src/main.rs");
     assert!(
         src.contains("agend_bin") && src.contains("filter"),
-        "must exclude $AGEND_HOME/bin from which resolution"
+        "must exclude $AGENTIC_GIT_HOME/bin from which resolution"
     );
 }
 
 #[test]
 fn no_self_ipc_in_shim() {
-    let src = include_str!("../src/bin/agend-git.rs");
+    let src = include_str!("../src/main.rs");
     for (i, line) in src.lines().enumerate() {
         if line.trim().starts_with("//") {
             continue;
         }
         assert!(
             !line.contains("api::call("),
-            "agend-git.rs line {} has forbidden api::call",
+            "agentic-git.rs line {} has forbidden api::call",
             i + 1
         );
     }
@@ -207,7 +207,7 @@ fn stress_shim_dispatch_no_deadlock() {
 #[test]
 #[ignore]
 fn stress_phase2_1h_soak() {
-    let duration_secs: u64 = std::env::var("AGEND_SOAK_DURATION")
+    let duration_secs: u64 = std::env::var("AGENTIC_SOAK_DURATION")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(60);
@@ -281,7 +281,7 @@ fn stress_shim_recursion_attempt() {
 }
 
 /// #2234 fix B (r6 #2316): end-to-end RUNTIME proof that the shim BINARY itself
-/// denies an agent's `AGEND_GIT_BYPASS` provisioning op in a canonical-rooted
+/// denies an agent's `AGENTIC_GIT_BYPASS` provisioning op in a canonical-rooted
 /// repo — exit 1 + a `DENIED` message — and passes carve-outs through. The pure
 /// `deny_agent_canonical_bypass` unit test covers the DECISION; this covers the
 /// WIRING (`enforce_agent_canonical_bypass_deny` reading the live env + cwd) and
@@ -313,30 +313,39 @@ fn shim_denies_agent_bypass_canonical_provisioning_2234() {
     let plain = root.join("plain");
     std::fs::create_dir_all(&plain).expect("mk plain dir");
 
-    let shim = env!("CARGO_BIN_EXE_agend-git");
+    let shim = env!("CARGO_BIN_EXE_agentic-git");
     let run = |cwd: &std::path::Path, instance: Option<&str>, escape: bool, args: &[&str]| {
         let mut c = Command::new(shim);
         c.args(args)
             .current_dir(cwd)
-            .env("AGEND_GIT_BYPASS", "1")
+            .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
             // Start at shim depth 0 (don't inherit an outer shim's depth).
+            // Every removal clears BOTH the primary name and its legacy
+            // (agend-terminal) fallback — an ambient legacy env (e.g. this
+            // suite running inside a legacy fleet PTY) would otherwise leak
+            // through `env_compat` and flip the scenario under test.
+            .env_remove("AGENTIC_GIT_SHIM_DEPTH")
             .env_remove("AGEND_GIT_SHIM_DEPTH")
-            // No AGEND_HOME → the #2158 audit log is skipped (no fleet_events).
+            // No AGENTIC_GIT_HOME → the #2158 audit log is skipped (no fleet_events).
+            .env_remove("AGENTIC_GIT_HOME")
             .env_remove("AGEND_HOME");
         match instance {
             Some(n) => {
-                c.env("AGEND_INSTANCE_NAME", n);
+                c.env("AGENTIC_GIT_AGENT", n);
+                c.env_remove("AGEND_INSTANCE_NAME");
             }
             None => {
+                c.env_remove("AGENTIC_GIT_AGENT");
                 c.env_remove("AGEND_INSTANCE_NAME");
             }
         }
         if escape {
-            c.env("AGEND_GIT_ALLOW_CANONICAL_MUTATE", "1");
+            c.env("AGENTIC_GIT_ALLOW_CANONICAL_MUTATE", "1");
         } else {
+            c.env_remove("AGENTIC_GIT_ALLOW_CANONICAL_MUTATE");
             c.env_remove("AGEND_GIT_ALLOW_CANONICAL_MUTATE");
         }
-        c.output().expect("run agend-git shim")
+        c.output().expect("run agentic-git shim")
     };
     let is_denied = |o: &std::process::Output| {
         o.status.code() == Some(1) && String::from_utf8_lossy(&o.stderr).contains("DENIED")
@@ -374,7 +383,7 @@ fn shim_denies_agent_bypass_canonical_provisioning_2234() {
     );
 
     // ── ALLOW / carve-outs (DENIED message absent) ──
-    // (a) no AGEND_INSTANCE_NAME (daemon-internal / operator shell) → pass.
+    // (a) no AGENTIC_GIT_AGENT (daemon-internal / operator shell) → pass.
     assert!(
         not_denied(&run(
             &canonical,
@@ -392,7 +401,7 @@ fn shim_denies_agent_bypass_canonical_provisioning_2234() {
             true,
             &["worktree", "add", "/tmp/agend-2234-wt-c", "origin/main"]
         )),
-        "AGEND_GIT_ALLOW_CANONICAL_MUTATE=1 must bypass the deny"
+        "AGENTIC_GIT_ALLOW_CANONICAL_MUTATE=1 must bypass the deny"
     );
     // non-`add` worktree subcommand (r4 over-block fix): `list` is read-only → pass.
     assert!(

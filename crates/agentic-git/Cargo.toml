@@ -1,0 +1,17 @@
+[package]
+name = "agentic-git"
+description = "A guarded, transparent git for AI coding agents — a PATH shim over the real git with per-agent worktree routing, a deny guardrail matrix, commit provenance, and audited bypass"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+agentic-git-core = { path = "../agentic-git-core", version = "0.1.0" }
+chrono = "0.4"
+serde_json = "1"
+which = "8"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["crates/agentic-git-core", "crates/agentic-git"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/suzuke/agentic-git"

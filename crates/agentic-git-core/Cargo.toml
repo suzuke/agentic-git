@@ -1,0 +1,13 @@
+[package]
+name = "agentic-git-core"
+description = "Contract modules shared between the agentic-git shim and any embedding system: binding HMAC integrity and the protected-ref predicate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hex = "0.4"
+hmac = "0.13"
+sha2 = "0.11"

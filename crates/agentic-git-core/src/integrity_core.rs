@@ -1,6 +1,6 @@
 //! #1651: shared HMAC-SHA256 integrity primitives — the VERIFY + key-read half,
 //! used by BOTH the main daemon (`config_integrity`, which adds the sign side)
-//! and the standalone `agend-git` shim (which only verifies). The shim cannot
+//! and the standalone `agentic-git` shim (which only verifies). The shim cannot
 //! link the lib and `config_integrity` lives in the main-binary tree, so this
 //! file is shared by source: `config_integrity` declares it as a module and the
 //! shim pulls THE SAME file via `#[path = "../integrity_core.rs"] mod
@@ -50,14 +50,16 @@ pub fn verify(home: &Path, content: &[u8], tag: &str) -> bool {
     mac.verify_slice(&tag_bytes).is_ok()
 }
 
-/// Test-only HMAC over the EXISTING home key (no generation), so tests in both
-/// binaries can fabricate valid sidecars without the getrandom sign path.
-// Used by the agend-git shim's tests (this file is shared by #[path]); unused in
-// the main binary's test build, hence the allow.
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn sign_for_test(home: &Path, content: &[u8]) -> String {
-    let key = read_key(home).expect("test key must exist");
+/// Reference signer: HMAC over the EXISTING home key (deliberately no key
+/// generation side-effect — provisioning the key is the embedder's job).
+/// The exact counterpart of the verifier above: an embedding system (daemon,
+/// orchestrator, tests) signs binding sidecars with this, so signer and
+/// verifier can never drift.
+///
+/// # Panics
+/// Panics if the home key does not exist — callers provision it first.
+pub fn sign(home: &Path, content: &[u8]) -> String {
+    let key = read_key(home).expect("integrity key must exist before signing");
     let mut mac = HmacSha256::new_from_slice(&key).expect("HMAC accepts any key length");
     mac.update(content);
     hex::encode(mac.finalize().into_bytes())

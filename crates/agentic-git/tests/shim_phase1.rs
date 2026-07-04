@@ -1,6 +1,6 @@
-//! Sprint 52 agend-git-shim Phase 1 integration tests.
+//! Sprint 52 agentic-git-shim Phase 1 integration tests.
 //!
-//! Tests trailer hook correctness, binding lifecycle, and AGEND_REAL_GIT injection.
+//! Tests trailer hook correctness, binding lifecycle, and AGENTIC_GIT_REAL_GIT injection.
 
 /// Binding write + read roundtrip.
 #[test]
@@ -37,12 +37,12 @@ fn binding_write_read_roundtrip() {
 /// Hook script is valid shell (syntax check).
 #[test]
 fn hook_script_valid_shell_syntax() {
-    let hook = include_str!("../assets/hooks/prepare-commit-msg");
+    let hook = include_str!("../../../assets/hooks/prepare-commit-msg");
     assert!(hook.starts_with("#!/bin/sh"), "must have shebang");
     assert!(hook.contains("exit 0"), "must always exit 0");
-    assert!(hook.contains("Agend-Agent:"), "must inject agent trailer");
+    assert!(hook.contains("Agentic-Agent:"), "must inject agent trailer");
     assert!(
-        hook.contains("AGEND_INSTANCE_NAME"),
+        hook.contains("AGENTIC_GIT_AGENT"),
         "must read instance name"
     );
 }
@@ -50,9 +50,9 @@ fn hook_script_valid_shell_syntax() {
 /// Hook idempotent: existing trailer → skip.
 #[test]
 fn hook_idempotent_skip_logic() {
-    let hook = include_str!("../assets/hooks/prepare-commit-msg");
+    let hook = include_str!("../../../assets/hooks/prepare-commit-msg");
     assert!(
-        hook.contains("grep -q \"^Agend-Agent:\""),
+        hook.contains("grep -q \"^Agentic-Agent:\""),
         "must check for existing trailer"
     );
 }
@@ -60,21 +60,21 @@ fn hook_idempotent_skip_logic() {
 /// Hook skips merge/squash/template commits.
 #[test]
 fn hook_skips_merge_squash_template() {
-    let hook = include_str!("../assets/hooks/prepare-commit-msg");
+    let hook = include_str!("../../../assets/hooks/prepare-commit-msg");
     assert!(
         hook.contains("merge|squash|template"),
         "must skip these sources"
     );
 }
 
-/// AGEND_REAL_GIT injection: verify `which` crate resolves git.
+/// AGENTIC_GIT_REAL_GIT injection: verify `which` crate resolves git.
 #[test]
 fn agend_real_git_resolves() {
     // which::which("git") should find git on any dev machine.
     let result = which::which("git");
     assert!(
         result.is_ok(),
-        "git must be findable via which (required for AGEND_REAL_GIT)"
+        "git must be findable via which (required for AGENTIC_GIT_REAL_GIT)"
     );
     let path = result.expect("git path");
     assert!(
@@ -83,19 +83,6 @@ fn agend_real_git_resolves() {
     );
 }
 
-/// No self-IPC in binding.rs (Sprint 49 regression guard).
-#[test]
-fn binding_no_self_ipc() {
-    let src = include_str!("../src/binding.rs");
-    for (i, line) in src.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("//") {
-            continue;
-        }
-        assert!(
-            !line.contains("api::call("),
-            "binding.rs line {} contains forbidden api::call: {line}",
-            i + 1
-        );
-    }
-}
+// (binding.rs self-IPC regression guard removed: it scanned the DAEMON's
+// binding.rs source, which lives in the upstream agend-terminal repo, not in
+// this extracted repo. The guard remains upstream.)

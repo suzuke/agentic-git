@@ -21,7 +21,7 @@ fn shim_is_protected_ref_case_insensitive() {
 
 // ── #1651: binding.json HMAC verify (push-authority integrity) ──
 fn home_1651(tag: &str) -> PathBuf {
-    let p = std::env::temp_dir().join(format!("agend-git-1651-{}-{}", std::process::id(), tag));
+    let p = std::env::temp_dir().join(format!("agentic-git-1651-{}-{}", std::process::id(), tag));
     let _ = std::fs::remove_dir_all(&p);
     std::fs::create_dir_all(&p).unwrap();
     // The shared integrity key (both signer + verifier read it).
@@ -34,7 +34,7 @@ fn write_binding_1651(home: &Path, agent: &str, body: &str, signed: bool) {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("binding.json"), body).unwrap();
     if signed {
-        let tag = integrity_core::sign_for_test(home, body.as_bytes());
+        let tag = integrity_core::sign(home, body.as_bytes());
         std::fs::write(dir.join("binding.json.sig"), tag).unwrap();
     }
 }
@@ -100,7 +100,7 @@ fn s(v: &[&str]) -> Vec<String> {
 #[test]
 fn same_dir_lexical_slash_fallback_1504() {
     // Nonexistent dirs → lexical fallback → backslash normalized to `/`, so a
-    // forward-slash `$AGEND_HOME/bin` still matches a backslash PATH entry
+    // forward-slash `$AGENTIC_GIT_HOME/bin` still matches a backslash PATH entry
     // (the Windows self-exclusion miss that caused the recursion).
     assert!(same_dir(
         std::path::Path::new("C:/h/bin"),
@@ -394,9 +394,9 @@ fn deny_hint_lists_all_three_bypass_forms() {
     let lines = format_deny_error("commit", "unbound", "dev", None);
     let joined = lines.join("\n");
     for var in [
-        "AGEND_GIT_BYPASS=1",
-        "AGEND_GIT_BYPASS_AGENT=",
-        "AGEND_GIT_BYPASS_UNTIL=",
+        "AGENTIC_GIT_BYPASS=1",
+        "AGENTIC_GIT_BYPASS_AGENT=",
+        "AGENTIC_GIT_BYPASS_UNTIL=",
     ] {
         assert!(
             joined.contains(var),
@@ -405,7 +405,7 @@ fn deny_hint_lists_all_three_bypass_forms() {
     }
     assert!(
         joined.contains("epoch") && joined.contains("Unix seconds"),
-        "AGEND_GIT_BYPASS_UNTIL hint must clarify epoch wording (not ISO), got:\n{joined}"
+        "AGENTIC_GIT_BYPASS_UNTIL hint must clarify epoch wording (not ISO), got:\n{joined}"
     );
 }
 
@@ -437,7 +437,7 @@ fn deny_message_names_bound_worktree_2379() {
         "bound remedy is 'cd there', got:\n{joined}"
     );
     assert!(
-        joined.contains("AGEND_GIT_BYPASS=1"),
+        joined.contains("AGENTIC_GIT_BYPASS=1"),
         "3-form bypass hint retained, got:\n{joined}"
     );
 }
@@ -701,7 +701,7 @@ fn audit_event_logged_when_exemption_fires() {
     // directly and assert the on-disk shape, which is what main
     // would emit.
     let home = std::env::temp_dir().join(format!(
-        "agend-git-d-audit-{}-{}",
+        "agentic-git-d-audit-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -753,7 +753,7 @@ fn deny_event_still_uses_typed_writer() {
     // writer must not change the on-disk shape for the deny
     // event-type so downstream parsers keep working.
     let home = std::env::temp_dir().join(format!(
-        "agend-git-d-deny-audit-{}-{}",
+        "agentic-git-d-deny-audit-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -818,7 +818,7 @@ fn git_event_carries_disposition_field_2379() {
     // (or flip disposition_for) → these fail. The envelope `kind` stays "git_event"
     // (no collision with the new axis).
     let home = std::env::temp_dir().join(format!(
-        "agend-git-disp-{}-{}",
+        "agentic-git-disp-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -857,7 +857,7 @@ fn conflict_guidance_emits_git_conflict_warn_event_2379() {
     // stderr-only → invisible to fleet observers). RM: drop the write_git_event_typed
     // call in emit_conflict_guidance → no git_conflict line → this fails.
     let home = std::env::temp_dir().join(format!(
-        "agend-git-conflict-evt-{}-{}",
+        "agentic-git-conflict-evt-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -884,7 +884,7 @@ fn vargs(a: &[&str]) -> Vec<String> {
 }
 
 fn home_s3(tag: &str) -> std::path::PathBuf {
-    let p = std::env::temp_dir().join(format!("agend-git-s3-{}-{}", std::process::id(), tag));
+    let p = std::env::temp_dir().join(format!("agentic-git-s3-{}-{}", std::process::id(), tag));
     let _ = std::fs::remove_dir_all(&p);
     std::fs::create_dir_all(&p).unwrap();
     // The shared integrity key (signer + verifier read it).
@@ -895,7 +895,7 @@ fn home_s3(tag: &str) -> std::path::PathBuf {
 fn write_policy(home: &std::path::Path, body: &str, signed: bool) {
     std::fs::write(home.join("policy.toml"), body).unwrap();
     if signed {
-        let tag = integrity_core::sign_for_test(home, body.as_bytes());
+        let tag = integrity_core::sign(home, body.as_bytes());
         std::fs::write(home.join("policy.toml.sig"), tag).unwrap();
     }
 }
@@ -1031,7 +1031,7 @@ fn is_bulk_push_flag_matches_all_mirror_not_others_s3() {
 #[test]
 fn push_default_is_matching_reads_config_s3() {
     let dir = std::env::temp_dir().join(format!(
-        "agend-git-s3pd-{}-{}",
+        "agentic-git-s3pd-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1044,7 +1044,7 @@ fn push_default_is_matching_reads_config_s3() {
         std::process::Command::new("git")
             .args(args)
             .current_dir(&dir)
-            .env("AGEND_GIT_BYPASS", "1")
+            .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
             .output()
             .unwrap();
     };
@@ -1277,7 +1277,7 @@ fn p778_bound_path_unchanged_when_canonical_cwd_true() {
 // `repo action=checkout bind=true` MCP tool (which gives them a
 // properly-bound worktree) or `gh pr diff/view` (read-only).
 
-/// #852 PR-B core: when caller is an agent (AGEND_INSTANCE_NAME
+/// #852 PR-B core: when caller is an agent (AGENTIC_GIT_AGENT
 /// set) AND cwd is a canonical-rooted worktree, the leniency must
 /// NOT fire — checkout is denied with an actionable hint pointing
 /// to the supported alternatives.
@@ -1321,7 +1321,7 @@ fn shim_denies_agent_checkout_in_canonical() {
 }
 
 /// #852 PR-B operator preservation: when caller is NOT an agent
-/// (operator's interactive shell, no AGEND_INSTANCE_NAME), the
+/// (operator's interactive shell, no AGENTIC_GIT_AGENT), the
 /// existing #778 leniency must continue to fire — the validation-
 /// canary flow must not regress.
 #[test]
@@ -1743,6 +1743,9 @@ fn setup_branch_with_init_pile(init_count: usize) -> (std::path::PathBuf, String
     let origin_bare = base.join("origin.git");
     let worktree = base.join("worktree");
     let git_env = [
+        ("AGENTIC_GIT_BYPASS", "1"),
+        // Legacy twin: keeps the fixture working when the test itself runs
+        // inside a legacy agend-terminal agent PTY (old shim on PATH).
         ("AGEND_GIT_BYPASS", "1"),
         ("GIT_AUTHOR_NAME", "test"),
         ("GIT_AUTHOR_EMAIL", "test@test"),
@@ -1845,7 +1848,7 @@ fn count_commits_above_base(worktree: &std::path::Path, base: &str) -> usize {
     let output = Command::new("git")
         .args(["log", &format!("{base}..HEAD"), "--format=%H"])
         .current_dir(worktree)
-        .env("AGEND_GIT_BYPASS", "1")
+        .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
         .output()
         .expect("git log spawn");
     if !output.status.success() {
@@ -1865,7 +1868,7 @@ fn rev_parse(worktree: &std::path::Path, refname: &str) -> String {
     let output = Command::new("git")
         .args(["rev-parse", refname])
         .current_dir(worktree)
-        .env("AGEND_GIT_BYPASS", "1")
+        .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
         .output()
         .expect("rev-parse spawn");
     String::from_utf8_lossy(&output.stdout).trim().to_string()
@@ -1942,6 +1945,8 @@ fn shim_push_cleanup_noop_when_no_inits() {
     let origin_bare = base.join("origin.git");
     let worktree = base.join("worktree");
     let env = [
+        ("AGENTIC_GIT_BYPASS", "1"),
+        // Legacy twin — see the sibling fixture above.
         ("AGEND_GIT_BYPASS", "1"),
         ("GIT_AUTHOR_NAME", "t"),
         ("GIT_AUTHOR_EMAIL", "t@t"),
@@ -2041,10 +2046,10 @@ fn has_unmerged_files_false_on_clean_repo() {
     ));
     std::fs::create_dir_all(&repo).unwrap();
     // #1748: drive fixture git through the REAL git binary, not the bare
-    // `git` PATH entry which resolves to this agend-git shim — whose #1463
+    // `git` PATH entry which resolves to this agentic-git shim — whose #1463
     // ChdirPass strips the `-C <tempdir>` and redirects the op onto the
     // caller's bound worktree, corrupting it. `resolve_real_git()` is the
-    // same resolver the shim uses to exec real git (excludes $AGEND_HOME/bin).
+    // same resolver the shim uses to exec real git (excludes $AGENTIC_GIT_HOME/bin).
     let git_bin = resolve_real_git();
     assert!(Command::new(&git_bin)
         .arg("-C")
@@ -2767,8 +2772,8 @@ fn build_bypass_audit_event_shape_2158() {
 /// Pure matcher table: trust-root basenames (at any depth) + `*.jsonl` are
 /// denied; normal repo files and near-misses are allowed. Includes the
 /// abs-prefix counter-example proving we match the repo-relative BASENAME, not
-/// a `$AGEND_HOME` filesystem prefix (which would false-block every file in a
-/// managed worktree under `$AGEND_HOME/worktrees/...`).
+/// a `$AGENTIC_GIT_HOME` filesystem prefix (which would false-block every file in a
+/// managed worktree under `$AGENTIC_GIT_HOME/worktrees/...`).
 #[test]
 fn trust_root_basename_denied_table_2379() {
     for p in [
@@ -2798,8 +2803,8 @@ fn trust_root_basename_denied_table_2379() {
         assert!(!trust_root_basename_denied(p), "{p:?} must be ALLOWED");
     }
     // ⚠ abs-prefix counter-example: a normal file whose ABSOLUTE path sits
-    // under `$AGEND_HOME/.agend-terminal/worktrees/...` is NOT denied — only
-    // its basename matters. Proves basename-match ≠ `$AGEND_HOME`-prefix match
+    // under `$AGENTIC_GIT_HOME/.agend-terminal/worktrees/...` is NOT denied — only
+    // its basename matters. Proves basename-match ≠ `$AGENTIC_GIT_HOME`-prefix match
     // (the bug the lead flagged: a prefix test would block 100% of pushes).
     assert!(!trust_root_basename_denied(
         "/Users/x/.agend-terminal/worktrees/dev/feat/x/src/foo.rs"
@@ -2814,7 +2819,7 @@ fn git_run_2379(args: &[&str], dir: &std::path::Path) -> std::process::Output {
     Command::new("git")
         .args(args)
         .current_dir(dir)
-        .env("AGEND_GIT_BYPASS", "1")
+        .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
         .env("GIT_AUTHOR_NAME", "test")
         .env("GIT_AUTHOR_EMAIL", "test@test")
         .env("GIT_COMMITTER_NAME", "test")
@@ -2997,7 +3002,7 @@ fn denylist_fails_closed_when_origin_main_missing_2379() {
 fn tracked_tree_has_zero_trust_root_hits_persistent_guard_2379() {
     let out = Command::new("git")
         .args(["ls-files"])
-        .env("AGEND_GIT_BYPASS", "1")
+        .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
         .output()
         .expect("git ls-files spawn");
     assert!(

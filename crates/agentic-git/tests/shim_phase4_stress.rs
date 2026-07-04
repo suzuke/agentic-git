@@ -1,4 +1,4 @@
-//! agend-git-shim Phase 4 GC stress tests.
+//! agentic-git-shim Phase 4 GC stress tests.
 //! Gated via `#[ignore]`. Run: `cargo test --test agend_git_shim_phase4_stress -- --ignored`
 
 use std::time::{Duration, Instant};
@@ -82,7 +82,7 @@ fn stress_gc_cutover_under_pin_change() {
 #[test]
 #[ignore]
 fn stress_phase4_1h_soak() {
-    let duration_secs: u64 = std::env::var("AGEND_SOAK_DURATION")
+    let duration_secs: u64 = std::env::var("AGENTIC_SOAK_DURATION")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(60);
@@ -133,11 +133,11 @@ fn stress_dry_run_only_when_flag_unset() {
         format!("agent=noflag-agent\nleased_at={old}\n"),
     )
     .ok();
-    std::env::remove_var("AGEND_WORKTREE_GC");
+    std::env::remove_var("AGENTIC_WORKTREE_GC");
     // 100 cutover attempts without flag → all must be no-ops.
     for _ in 0..100 {
         // Simulate: check flag → skip.
-        assert!(std::env::var("AGEND_WORKTREE_GC").is_err());
+        assert!(std::env::var("AGENTIC_WORKTREE_GC").is_err());
     }
     assert!(
         wt.exists(),

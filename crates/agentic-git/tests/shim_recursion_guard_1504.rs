@@ -1,5 +1,5 @@
-//! #1504 L3: the agend-git shim's recursion guard hard-fails (exit 70) when the
-//! propagated `AGEND_GIT_SHIM_DEPTH` sentinel reaches the cap, instead of
+//! #1504 L3: the agentic-git shim's recursion guard hard-fails (exit 70) when the
+//! propagated `AGENTIC_GIT_SHIM_DEPTH` sentinel reaches the cap, instead of
 //! spawning git unbounded (the Windows fork-bomb: `exec_real_git` uses
 //! `status()` = spawn, not exec-replace). Process-isolated, so it runs on every
 //! OS and never mutates the test process env.
@@ -9,11 +9,11 @@
 /// exit 70 with an actionable message.
 #[test]
 fn recursion_guard_hard_fails_at_max_depth_1504() {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_agend-git"))
-        .env("AGEND_GIT_SHIM_DEPTH", "3")
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_agentic-git"))
+        .env("AGENTIC_GIT_SHIM_DEPTH", "3")
         .arg("--version")
         .output()
-        .expect("run agend-git shim");
+        .expect("run agentic-git shim");
     assert_eq!(
         out.status.code(),
         Some(70),
@@ -32,11 +32,11 @@ fn recursion_guard_hard_fails_at_max_depth_1504() {
 /// only the guard exit 70 is asserted against.)
 #[test]
 fn recursion_guard_does_not_fire_below_cap_1504() {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_agend-git"))
-        .env("AGEND_GIT_SHIM_DEPTH", "2")
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_agentic-git"))
+        .env("AGENTIC_GIT_SHIM_DEPTH", "2")
         .arg("--version")
         .output()
-        .expect("run agend-git shim");
+        .expect("run agentic-git shim");
     assert_ne!(
         out.status.code(),
         Some(70),

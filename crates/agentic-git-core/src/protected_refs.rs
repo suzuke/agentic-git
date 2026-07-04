@@ -1,11 +1,11 @@
 //! Canonical "is this a protected git ref" predicate — E4.5.
 //!
 //! #2550 W4: extracted out of `agent_ops.rs` into its own standalone file
-//! (no `crate::*` dependencies) so `bin/agend-git.rs` — a separate binary
+//! (no `crate::*` dependencies) so `bin/agentic-git.rs` — a separate binary
 //! that cannot link the full library — can `#[path]`-include this EXACT
 //! source, closing the shim/lib manual-sync gap the same way
 //! `integrity_core.rs` already does for the HMAC verifier (see
-//! `bin/agend-git.rs`'s `mod integrity_core` include).
+//! `bin/agentic-git.rs`'s `mod integrity_core` include).
 
 /// The canonical protected-ref set: `main` and `master`. Extending this
 /// propagates to every E4.5 enforcement site (`worktree_pool::lease`,

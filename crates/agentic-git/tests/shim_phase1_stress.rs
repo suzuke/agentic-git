@@ -1,4 +1,4 @@
-//! agend-git-shim Phase 1 stress tests.
+//! agentic-git-shim Phase 1 stress tests.
 //!
 //! Gated via `#[ignore]` for fast CI. Run manually before merge:
 //! `cargo test --test agend_git_shim_phase1_stress -- --ignored`
@@ -60,11 +60,11 @@ fn stress_concurrent_binding_writes() {
 
 /// Hook trailer soak: random binding states for 60s, verify trailer logic
 /// correctness (drift counter <0.1%).
-/// Set AGEND_SOAK_DURATION=3600 for full 1h soak.
+/// Set AGENTIC_SOAK_DURATION=3600 for full 1h soak.
 #[test]
 #[ignore]
 fn stress_hook_trailer_soak() {
-    let duration_secs: u64 = std::env::var("AGEND_SOAK_DURATION")
+    let duration_secs: u64 = std::env::var("AGENTIC_SOAK_DURATION")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(60);
@@ -104,7 +104,7 @@ fn stress_hook_trailer_soak() {
     );
 }
 
-/// AGEND_REAL_GIT integrity: verify which::which("git") resolves consistently.
+/// AGENTIC_GIT_REAL_GIT integrity: verify which::which("git") resolves consistently.
 #[test]
 #[ignore]
 fn stress_agend_real_git_integrity() {
@@ -115,7 +115,7 @@ fn stress_agend_real_git_integrity() {
         let resolved = which::which("git").expect("git resolution must not fail");
         assert_eq!(
             resolved, first,
-            "AGEND_REAL_GIT must resolve consistently across spawns"
+            "AGENTIC_GIT_REAL_GIT must resolve consistently across spawns"
         );
     }
 }

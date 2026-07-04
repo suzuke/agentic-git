@@ -1,4 +1,4 @@
-//! agend-git-shim Phase 3 stress tests.
+//! agentic-git-shim Phase 3 stress tests.
 //! Gated via `#[ignore]`. Run: `cargo test --test agend_git_shim_phase3_stress -- --ignored`
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -59,7 +59,7 @@ fn stress_lease_dispatch_no_deadlock() {
 #[test]
 #[ignore]
 fn stress_phase3_1h_soak() {
-    let duration_secs: u64 = std::env::var("AGEND_SOAK_DURATION")
+    let duration_secs: u64 = std::env::var("AGENTIC_SOAK_DURATION")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(60);

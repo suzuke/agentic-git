@@ -1,4 +1,4 @@
-//! agend-git-shim Phase 5 hotspot stress tests.
+//! agentic-git-shim Phase 5 hotspot stress tests.
 //! Gated via `#[ignore]`. Run: `cargo test --test agend_git_shim_phase5_stress -- --ignored`
 
 use std::collections::HashMap;
@@ -56,7 +56,7 @@ fn stress_phase5_1h_soak() {
     // not fail and exercised no real index path. That vacuous machinery is
     // removed; the soak now drives a real HashMap insert/lookup and keeps only
     // the genuine, failable throughput assertion.
-    let duration_secs: u64 = std::env::var("AGEND_SOAK_DURATION")
+    let duration_secs: u64 = std::env::var("AGENTIC_SOAK_DURATION")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(60);

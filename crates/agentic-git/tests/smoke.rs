@@ -156,3 +156,41 @@ fn run_refuses_home_with_path_separator_smoke() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Review #4 (fugu hunt): the DOCUMENTED restore — `git checkout <snap> -- .`
+/// — must work THROUGH the shim without bypass. The recovery layer is useless
+/// if its own restore command is denied as "cross-branch". Full round-trip in
+/// a real session: dirty + untracked → reset --hard (snapshot) → delete the
+/// untracked file → documented restore → both recovered.
+#[test]
+fn run_session_documented_restore_works_without_bypass_smoke() {
+    let root = tmp("restore");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let rg = real_git();
+    init_repo(&rg, &repo);
+    let home = root.join("home");
+
+    let script = r#"
+set -u
+echo orig > f.txt; git add f.txt; git commit -q -m base
+echo DIRTY > f.txt          # tracked change
+echo NEW > untracked.txt    # untracked file
+git reset --hard >/dev/null 2>&1   # discards f.txt back to orig; untracked survives
+snap=$(git for-each-ref --format='%(refname)' refs/agentic-git/snapshots/ | head -1)
+echo "SNAP=${snap:-NONE}"
+rm -f untracked.txt         # now the untracked file is gone too
+# THE documented restore — through the shim, NO bypass:
+if git checkout "$snap" -- . 2>/tmp/restore.err; then echo RESTORE=ran; else echo RESTORE=denied; fi
+echo "FTXT=$(cat f.txt)"
+echo "UNTRACKED=$(cat untracked.txt 2>/dev/null || echo MISSING)"
+"#;
+    let out = run_session(&repo, &home, &rg, "restore", "feat/restore", script);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stderr), s);
+    assert!(!s.contains("SNAP=NONE"), "a snapshot must exist to restore from:\n{s}");
+    assert!(s.contains("RESTORE=ran"), "documented restore must NOT be denied by the shim:\n{s}");
+    assert!(s.contains("FTXT=DIRTY"), "tracked change recovered byte-for-byte:\n{s}");
+    assert!(s.contains("UNTRACKED=NEW"), "untracked file recovered:\n{s}");
+    let _ = std::fs::remove_dir_all(&root);
+}

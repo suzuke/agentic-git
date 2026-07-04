@@ -247,8 +247,13 @@ fn legacy_only_env_exercises_route_deny_bypass() {
         true,
         &["checkout", "main"],
     );
+    // Assert on the deny's SIGNATURE ("cross-branch — assigned to …"), not the
+    // loose word "denied": the #2158 bypass audit dumps process ancestry to
+    // stderr, so a parent command containing "denied" would false-trip a
+    // substring check. The cross-branch deny message cannot appear when the op
+    // is bypassed.
     assert!(
-        !String::from_utf8_lossy(&bypass.stderr).contains("denied"),
+        !String::from_utf8_lossy(&bypass.stderr).contains("cross-branch"),
         "AGEND_GIT_BYPASS=1 (legacy name) must bypass the deny: {}",
         String::from_utf8_lossy(&bypass.stderr)
     );

@@ -315,6 +315,16 @@ fn create_snapshot_inner(
     commit_cmd
         .arg("-C")
         .arg(dir)
+        // Force a self-contained identity: `commit-tree` REQUIRES an
+        // author+committer, and a fresh CI runner / container / un-configured
+        // machine has no git `user.name`/`user.email` — there, the snapshot's
+        // commit-tree would silently fail (fail-open → NO safety net) exactly
+        // where the recovery layer is supposed to work. A fixed identity makes
+        // snapshots environment-independent. (Dates are forced below.)
+        .env("GIT_AUTHOR_NAME", "agentic-git")
+        .env("GIT_AUTHOR_EMAIL", "agentic-git@localhost")
+        .env("GIT_COMMITTER_NAME", "agentic-git")
+        .env("GIT_COMMITTER_EMAIL", "agentic-git@localhost")
         .env("GIT_AUTHOR_DATE", now_ident_date())
         .env("GIT_COMMITTER_DATE", now_ident_date())
         .arg("commit-tree")

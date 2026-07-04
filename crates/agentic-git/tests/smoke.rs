@@ -67,6 +67,11 @@ fn run_session(repo: &Path, home: &Path, real_git: &Path, agent: &str, branch: &
         .env("AGENTIC_GIT_HOME", home)
         .env("AGENTIC_GIT_REAL_GIT", real_git)
         .env("PATH", sanitized_path(real_git))
+        // A CI runner has no git user config; give the whole session an identity
+        // so the agent's own `git commit`s succeed (the snapshot layer forces
+        // its own — see snapshot.rs).
+        .env("GIT_AUTHOR_NAME", "smoke").env("GIT_AUTHOR_EMAIL", "smoke@t")
+        .env("GIT_COMMITTER_NAME", "smoke").env("GIT_COMMITTER_EMAIL", "smoke@t")
         .env_remove("AGEND_HOME").env_remove("AGEND_INSTANCE_NAME").env_remove("AGEND_REAL_GIT")
         .env_remove("AGENTIC_GIT_BYPASS").env_remove("AGEND_GIT_BYPASS")
         .env_remove("AGENTIC_GIT_SNAPSHOTS").env_remove("AGEND_GIT_SNAPSHOTS")

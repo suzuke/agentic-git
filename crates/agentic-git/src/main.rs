@@ -1854,15 +1854,22 @@ fn commit_is_empty_heartbeat(worktree: &str, hash: &str) -> bool {
         if trimmed.is_empty() {
             continue;
         }
-        // Tolerate the four `Agentic-*` trailer keys the prepare-commit-msg
-        // hook injects (`Agentic-Agent`, `Agentic-Task`, `Agentic-Branch`,
-        // `Agentic-Issued-At` — per `dispatch_hook/mod.rs:979`). Anything
-        // else means there's a real commit message body → not a
-        // heartbeat.
+        // Tolerate the four trailer keys the prepare-commit-msg hook
+        // injects (`Agentic-Agent`, `Agentic-Task`, `Agentic-Branch`,
+        // `Agentic-Issued-At`) — AND their legacy `Agend-*` twins: a
+        // legacy agend-terminal fleet's hooks still write the old names,
+        // and heartbeat detection must recognize both generations
+        // (review-1 finding: name-only drift here broke the
+        // zero-daemon-change adoption guarantee). Anything else means
+        // there's a real commit message body → not a heartbeat.
         if trimmed.starts_with("Agentic-Agent:")
             || trimmed.starts_with("Agentic-Task:")
             || trimmed.starts_with("Agentic-Branch:")
             || trimmed.starts_with("Agentic-Issued-At:")
+            || trimmed.starts_with("Agend-Agent:")
+            || trimmed.starts_with("Agend-Task:")
+            || trimmed.starts_with("Agend-Branch:")
+            || trimmed.starts_with("Agend-Issued-At:")
         {
             continue;
         }
@@ -2237,9 +2244,24 @@ fn exec_real_git(args: &[String], chdir: Option<&str>) -> ! {
 
 fn resolve_real_git() -> String {
     // Priority 1: AGENTIC_GIT_REAL_GIT env (injected by daemon at spawn).
+    // Review-1 hardening: REJECT the env value when it resolves to THIS
+    // binary. A standalone user who prepends `<home>/bin` to PATH *before*
+    // running `command -v git` captures the shim itself here; trusting it
+    // verbatim guarantees a self-exec loop that only dies at the #1504
+    // depth cap (exit 70). Detecting the foot-gun at resolution time lets
+    // the Priority-2 self-excluding PATH search below do its job instead.
     if let Ok(path) = env_compat("AGENTIC_GIT_REAL_GIT") {
         if !path.is_empty() && std::path::Path::new(&path).exists() {
-            return path;
+            let points_at_self = match (
+                std::fs::canonicalize(&path),
+                std::env::current_exe().and_then(std::fs::canonicalize),
+            ) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => false,
+            };
+            if !points_at_self {
+                return path;
+            }
         }
     }
     // Priority 2: which excluding $AGENTIC_GIT_HOME/bin/ (the shim dir).

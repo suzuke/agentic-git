@@ -1,4 +1,4 @@
-# agend-terminal prepare-commit-msg hook (PowerShell) — injects fleet trailers.
+# agentic-git prepare-commit-msg hook (PowerShell) — injects fleet trailers.
 # Windows equivalent of the bash hook.
 
 param($CommitMsgFile, $CommitSource)
@@ -6,10 +6,14 @@ param($CommitMsgFile, $CommitSource)
 # Skip merge/squash/template commits.
 if ($CommitSource -in @("merge", "squash", "template")) { exit 0 }
 
+# Legacy fallbacks mirror the bash hook: a legacy agend-terminal fleet only
+# sets AGEND_INSTANCE_NAME / AGEND_HOME.
 $Agent = $env:AGENTIC_GIT_AGENT
+if (-not $Agent) { $Agent = $env:AGEND_INSTANCE_NAME }
 if (-not $Agent) { exit 0 }
 
 $HomeDir = $env:AGENTIC_GIT_HOME
+if (-not $HomeDir) { $HomeDir = $env:AGEND_HOME }
 if (-not $HomeDir) { exit 0 }
 
 $Binding = Join-Path $HomeDir "runtime" $Agent "binding.json"

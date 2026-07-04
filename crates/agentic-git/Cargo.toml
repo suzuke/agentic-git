@@ -12,6 +12,9 @@ agentic-git-core = { path = "../agentic-git-core", version = "0.1.0" }
 chrono = "0.4"
 serde_json = "1"
 which = "8"
+# Session mode (Δ2): atomic first-writer-wins key provisioning + default
+# agent-name suffix randomness. The only new dependency this feature adds.
+getrandom = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -21,3 +21,27 @@ jobs:
       - run: cargo test --workspace
       - run: cargo clippy --workspace -- -D warnings
         if: matrix.os == 'ubuntu-latest'
+
+  # Δ5 / INVARIANT clause 5 (agentic-git issue #1, session mode): the
+  # zero-daemon-change adoption guarantee is a REQUIRED job, not a manual
+  # acceptance check. Explicitly unsets every `AGENTIC_GIT_*` variable — not
+  # merely "doesn't set them" (Δ5 clarification: this runner's own env/cache
+  # could otherwise leak one in) — before running the legacy-only suite, and
+  # fails if its representative route/deny/bypass cases didn't all run
+  # (count-assert via the suite's own marker line), so an accidentally-
+  # skipped case can't pass as green.
+  legacy-env-adoption:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --workspace
+      - name: legacy-only adoption suite (AGEND_* env only)
+        run: |
+          unset AGENTIC_GIT_HOME AGENTIC_GIT_AGENT AGENTIC_GIT_REAL_GIT \
+                AGENTIC_GIT_BYPASS AGENTIC_GIT_BYPASS_AGENT AGENTIC_GIT_BYPASS_UNTIL \
+                AGENTIC_GIT_SHIM_DEPTH AGENTIC_GIT_ALLOW_CANONICAL_MUTATE
+          cargo test --test legacy_env_adoption -- --nocapture --test-threads=1 | tee legacy-adoption.log
+          test "${PIPESTATUS[0]}" -eq 0
+          grep -q "LEGACY-ADOPTION-CASES-RUN: 3" legacy-adoption.log
+        shell: bash

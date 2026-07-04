@@ -68,7 +68,67 @@ fn shim_depth() -> u32 {
         .unwrap_or(0)
 }
 
+/// Session mode (argv[0] dispatch, Δ1): CLI surface lives in its own module so
+/// `main.rs` churn stays minimal and shim-mode's existing body is untouched.
+mod cli;
+
+/// Δ1: mode = shim iff `basename(argv[0])`, with a trailing `.exe`/`.EXE`
+/// stripped, equals `git` — case-insensitive ONLY on `cfg(windows)`, exact on
+/// Unix. Covers bare `git`, absolute-path invocation (`<home>/bin/git`), and
+/// Windows `git.exe` copies. Everything else (including the bare compiled
+/// binary name `agentic-git`) is CLI mode — never silently shims.
+fn is_git_invocation(argv0: &std::ffi::OsStr) -> bool {
+    let base = match Path::new(argv0).file_name() {
+        Some(b) => b.to_string_lossy().into_owned(),
+        None => return false,
+    };
+    let stripped = base
+        .strip_suffix(".exe")
+        .or_else(|| base.strip_suffix(".EXE"))
+        .unwrap_or(&base);
+    if cfg!(windows) {
+        stripped.eq_ignore_ascii_case("git")
+    } else {
+        stripped == "git"
+    }
+}
+
+/// #1504 L3: recursion guard. If git ever resolves back to THIS shim (e.g.
+/// AGENTIC_GIT_REAL_GIT unset + self-exclusion miss), each real-git spawn
+/// re-enters here; on Windows `exec_real_git` uses `status()` (spawn), so
+/// it's an unbounded process storm, not a single exec-replace. Cap the depth
+/// and hard-fail with an actionable message. Checked BEFORE mode dispatch
+/// (and, redundantly but harmlessly, again at the top of `shim_main` below —
+/// that inline copy is left byte-identical to preserve "shim flow is
+/// untouched") because this is a cross-cutting recursion safety net, not
+/// shim-specific business logic: whichever entry point this process took, a
+/// propagated `AGENTIC_GIT_SHIM_DEPTH` at the cap means something upstream
+/// already re-entered this binary and must hard-fail before doing anything
+/// else, including CLI-mode `run`'s own git child-process spawns.
+fn recursion_guard_or_exit() {
+    let depth = shim_depth();
+    if depth >= MAX_SHIM_DEPTH {
+        eprintln!(
+            "agentic-git: FATAL recursion guard tripped (AGENTIC_GIT_SHIM_DEPTH={depth}) — the \
+             shim resolved git to itself. AGENTIC_GIT_REAL_GIT is unset/unresolvable and \
+             $AGENTIC_GIT_HOME/bin was not excluded from PATH. Set AGENTIC_GIT_REAL_GIT to the real \
+             git binary. (#1504)"
+        );
+        std::process::exit(70); // EX_SOFTWARE
+    }
+}
+
 fn main() {
+    recursion_guard_or_exit();
+    let argv0 = env::args_os().next().unwrap_or_default();
+    if is_git_invocation(&argv0) {
+        shim_main();
+    } else {
+        cli::cli_main();
+    }
+}
+
+fn shim_main() {
     let args: Vec<String> = env::args().skip(1).collect();
 
     // #1504 L3: recursion guard. If git ever resolves back to THIS shim (e.g.

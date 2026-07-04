@@ -297,6 +297,13 @@ fn stress_shim_recursion_attempt() {
 #[test]
 fn shim_denies_agent_bypass_canonical_provisioning_2234() {
     use std::process::Command;
+    // Session mode (argv[0] dispatch, agentic-git issue #1 Δ1): mode is now
+    // determined by `basename(argv[0])`, not merely "is this the compiled
+    // binary". The bare `CARGO_BIN_EXE_agentic-git` path's basename is
+    // "agentic-git", which is the issue's own literal CLI-mode example — so
+    // every invocation below must force argv[0] to "git" to keep exercising
+    // shim mode (unchanged assertions; only the invocation shape changes).
+    use std::os::unix::process::CommandExt;
 
     let root = std::env::temp_dir().join(format!("agend-2234-deny-{}", std::process::id()));
     // Throwaway "canonical" fixture: a `.git` DIR whose config carries
@@ -316,7 +323,8 @@ fn shim_denies_agent_bypass_canonical_provisioning_2234() {
     let shim = env!("CARGO_BIN_EXE_agentic-git");
     let run = |cwd: &std::path::Path, instance: Option<&str>, escape: bool, args: &[&str]| {
         let mut c = Command::new(shim);
-        c.args(args)
+        c.arg0("git")
+            .args(args)
             .current_dir(cwd)
             .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
             // Start at shim depth 0 (don't inherit an outer shim's depth).
@@ -486,6 +494,12 @@ fn shim_denies_agent_bypass_canonical_provisioning_2234() {
 /// PATH search instead of self-exec'ing into the #1504 depth cap (exit 70).
 #[test]
 fn self_referential_real_git_env_ignored_review1() {
+    // Session mode (argv[0] dispatch, agentic-git issue #1 Δ1): force
+    // argv[0] to "git" below so this keeps exercising shim mode — the bare
+    // `CARGO_BIN_EXE_agentic-git` path's basename ("agentic-git") is now the
+    // issue's own literal CLI-mode example. Assertions are unchanged; only
+    // the invocation shape is.
+    use std::os::unix::process::CommandExt;
     let shim = env!("CARGO_BIN_EXE_agentic-git");
     let real_git = std::path::Path::new("/usr/bin/git");
     if !real_git.exists() {
@@ -520,6 +534,7 @@ fn self_referential_real_git_env_ignored_review1() {
         .success());
     let path_env = std::env::join_paths([bin.clone(), realdir.clone()]).unwrap();
     let out = std::process::Command::new(shim)
+        .arg0("git")
         .args(["status"])
         .current_dir(&repo)
         .env("PATH", &path_env)

@@ -3073,3 +3073,49 @@ fn empty_heartbeat_with_legacy_agend_trailers_detected_review1() {
     );
     let _ = std::fs::remove_dir_all(&base);
 }
+
+// ── Session mode Δ1: argv[0] dispatch predicate ─────────────────────────
+
+#[test]
+fn is_git_invocation_matches_bare_and_absolute_git() {
+    assert!(is_git_invocation(std::ffi::OsStr::new("git")));
+    assert!(is_git_invocation(std::ffi::OsStr::new(
+        "/home/u/.agentic-git/bin/git"
+    )));
+}
+
+#[test]
+fn is_git_invocation_rejects_agentic_git_and_lookalikes() {
+    // Issue's own worked example: `agentic-git …` (the bare compiled binary
+    // name) is explicitly the "otherwise" CLI-mode bucket, never shim.
+    assert!(!is_git_invocation(std::ffi::OsStr::new("agentic-git")));
+    assert!(!is_git_invocation(std::ffi::OsStr::new(
+        "/usr/local/bin/agentic-git"
+    )));
+    assert!(!is_git_invocation(std::ffi::OsStr::new("gitx")));
+    assert!(!is_git_invocation(std::ffi::OsStr::new("mygit")));
+    assert!(!is_git_invocation(std::ffi::OsStr::new("")));
+}
+
+#[test]
+fn is_git_invocation_strips_trailing_exe_extension() {
+    assert!(is_git_invocation(std::ffi::OsStr::new("git.exe")));
+    assert!(is_git_invocation(std::ffi::OsStr::new("git.EXE")));
+    assert!(is_git_invocation(std::ffi::OsStr::new(
+        "/home/u/.agentic-git/bin/git.exe"
+    )));
+}
+
+#[test]
+#[cfg(windows)]
+fn is_git_invocation_case_insensitive_only_on_windows() {
+    assert!(is_git_invocation(std::ffi::OsStr::new("GIT")));
+    assert!(is_git_invocation(std::ffi::OsStr::new("Git.Exe")));
+}
+
+#[test]
+#[cfg(not(windows))]
+fn is_git_invocation_case_sensitive_on_unix() {
+    assert!(!is_git_invocation(std::ffi::OsStr::new("GIT")));
+    assert!(!is_git_invocation(std::ffi::OsStr::new("Git")));
+}

@@ -5,7 +5,8 @@
 //! `AGENTIC_GIT_*` variable explicitly removed (never merely "not set" —
 //! Δ5's own clarification: ambient CI images/caches can leak env) and only
 //! legacy names present, then exercises representative route / deny /
-//! bypass cases.
+//! bypass / snapshot cases (the last extended for issue #4's recovery
+//! layer, which carries its own legacy-twin kill switch).
 //!
 //! The `.github/workflows/ci.yml` `legacy-env-adoption` job additionally
 //! count-asserts (via `--nocapture` + a grep on the marker line this test
@@ -19,8 +20,11 @@ use std::process::Command;
 
 /// route (bound agent's `status` chdir-passes into the worktree), deny
 /// (bound agent's cross-branch checkout is denied), bypass (the SAME deny,
-/// but with the LEGACY `AGEND_GIT_BYPASS` name, passes through).
-const EXPECTED_CASES: u32 = 3;
+/// but with the LEGACY `AGEND_GIT_BYPASS` name, passes through), snapshot
+/// (issue #4: a destructive op on a dirty bound worktree creates a
+/// recovery-layer snapshot ref with ONLY the legacy `AGEND_GIT_SNAPSHOTS`
+/// name set).
+const EXPECTED_CASES: u32 = 4;
 
 fn tempdir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -115,15 +119,54 @@ fn run_shim_legacy_only(
         .env_remove("AGENTIC_GIT_BYPASS_UNTIL")
         .env_remove("AGENTIC_GIT_SHIM_DEPTH")
         .env_remove("AGENTIC_GIT_ALLOW_CANONICAL_MUTATE")
+        .env_remove("AGENTIC_GIT_SNAPSHOTS")
+        .env_remove("AGEND_GIT_SHIM_DEPTH")
+        .env_remove("AGEND_GIT_BYPASS")
+        .env_remove("AGEND_GIT_BYPASS_AGENT")
+        .env_remove("AGEND_GIT_BYPASS_UNTIL")
+        .env_remove("AGEND_GIT_ALLOW_CANONICAL_MUTATE")
+        .env_remove("AGEND_GIT_SNAPSHOTS");
+    if bypass {
+        c.env("AGEND_GIT_BYPASS", "1");
+    }
+    c.output().expect("run shim (legacy-only env)")
+}
+
+/// #4 Δc/Δf: same legacy-only env purity as `run_shim_legacy_only`, PLUS the
+/// legacy `AGEND_GIT_SNAPSHOTS=1` kill switch — proving the recovery layer
+/// is reachable via the legacy name alone, same zero-daemon-change contract
+/// every other var in this suite already follows.
+fn run_shim_legacy_only_snapshots_on(
+    cwd: &Path,
+    home: &Path,
+    agent: &str,
+    real_git: &Path,
+    args: &[&str],
+) -> std::process::Output {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_agentic-git"));
+    c.arg0("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("AGEND_HOME", home)
+        .env("AGEND_INSTANCE_NAME", agent)
+        .env("AGEND_REAL_GIT", real_git)
+        .env("AGEND_GIT_SNAPSHOTS", "1")
+        .env_remove("AGENTIC_GIT_HOME")
+        .env_remove("AGENTIC_GIT_AGENT")
+        .env_remove("AGENTIC_GIT_REAL_GIT")
+        .env_remove("AGENTIC_GIT_BYPASS")
+        .env_remove("AGENTIC_GIT_BYPASS_AGENT")
+        .env_remove("AGENTIC_GIT_BYPASS_UNTIL")
+        .env_remove("AGENTIC_GIT_SHIM_DEPTH")
+        .env_remove("AGENTIC_GIT_ALLOW_CANONICAL_MUTATE")
+        .env_remove("AGENTIC_GIT_SNAPSHOTS")
         .env_remove("AGEND_GIT_SHIM_DEPTH")
         .env_remove("AGEND_GIT_BYPASS")
         .env_remove("AGEND_GIT_BYPASS_AGENT")
         .env_remove("AGEND_GIT_BYPASS_UNTIL")
         .env_remove("AGEND_GIT_ALLOW_CANONICAL_MUTATE");
-    if bypass {
-        c.env("AGEND_GIT_BYPASS", "1");
-    }
-    c.output().expect("run shim (legacy-only env)")
+    c.output()
+        .expect("run shim (legacy-only env, snapshots on)")
 }
 
 /// Route / deny / bypass, exercised with ONLY legacy `AGEND_*` env set.
@@ -208,6 +251,36 @@ fn legacy_only_env_exercises_route_deny_bypass() {
         !String::from_utf8_lossy(&bypass.stderr).contains("denied"),
         "AGEND_GIT_BYPASS=1 (legacy name) must bypass the deny: {}",
         String::from_utf8_lossy(&bypass.stderr)
+    );
+    cases_run += 1;
+
+    // ── SNAPSHOT: destructive op on a dirty bound worktree creates a
+    // recovery-layer snapshot ref, with ONLY the LEGACY `AGEND_GIT_SNAPSHOTS`
+    // name set (issue #4 Δc/Δf) ──
+    std::fs::write(worktree.join("dirty.txt"), "uncommitted\n").unwrap();
+    let snap = run_shim_legacy_only_snapshots_on(
+        &repo,
+        &home,
+        "legacy-agent",
+        &real_git,
+        &["reset", "--hard"],
+    );
+    assert!(
+        snap.status.success(),
+        "the destructive op must still succeed under legacy-only snapshot env: stderr={}",
+        String::from_utf8_lossy(&snap.stderr)
+    );
+    let refs_out = Command::new(&real_git)
+        .args(["for-each-ref", "refs/agentic-git/snapshots/"])
+        .current_dir(&repo)
+        .env("AGENTIC_GIT_BYPASS", "1")
+        .env("AGEND_GIT_BYPASS", "1")
+        .output()
+        .expect("list snapshot refs");
+    assert!(
+        !refs_out.stdout.is_empty(),
+        "a snapshot ref must exist when AGEND_GIT_SNAPSHOTS=1 (legacy name only) is set: {}",
+        String::from_utf8_lossy(&refs_out.stderr)
     );
     cases_run += 1;
 

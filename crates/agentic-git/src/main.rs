@@ -42,6 +42,9 @@ fn legacy_env_name(name: &str) -> Option<&'static str> {
         "AGENTIC_GIT_BYPASS_UNTIL" => "AGEND_GIT_BYPASS_UNTIL",
         "AGENTIC_GIT_SHIM_DEPTH" => "AGEND_GIT_SHIM_DEPTH",
         "AGENTIC_GIT_ALLOW_CANONICAL_MUTATE" => "AGEND_GIT_ALLOW_CANONICAL_MUTATE",
+        // #4 Δc: recovery-layer kill switch, legacy twin per the same
+        // zero-daemon-change adoption contract every other var here follows.
+        "AGENTIC_GIT_SNAPSHOTS" => "AGEND_GIT_SNAPSHOTS",
         _ => return None,
     })
 }
@@ -71,6 +74,10 @@ fn shim_depth() -> u32 {
 /// Session mode (argv[0] dispatch, Δ1): CLI surface lives in its own module so
 /// `main.rs` churn stays minimal and shim-mode's existing body is untouched.
 mod cli;
+
+/// P2 recovery layer (issue #4): pre-destructive-op snapshots, push guard,
+/// and lazy prune — lives in its own module for the same reason `cli` does.
+mod snapshot;
 
 /// Δ1: mode = shim iff `basename(argv[0])`, with a trailing `.exe`/`.EXE`
 /// stripped, equals `git` — case-insensitive ONLY on `cfg(windows)`, exact on
@@ -199,6 +206,18 @@ fn shim_main() {
             // control-flow-inert; the `exec_real_git` below is unchanged.
             log_nonagent_canonical_checkout(&home, &agent, &args);
         }
+        // Impl-review finding (deviation #4): a solo user who EXPLICITLY opted
+        // into the recovery net (AGENTIC_GIT_SNAPSHOTS=1) but has no agent
+        // context must still get it — otherwise the `noagent` fallback the
+        // design promises is dead code. `maybe_snapshot` is a no-op unless the
+        // op is destructive AND snapshots are enabled, so this only fires on a
+        // consented opt-in; it snapshots to the repo's own refs (no home
+        // needed), with who=noagent, and is additive + fail-open — the
+        // passthrough `exec_real_git` below is unchanged.
+        if let Some(idx) = subcommand_index(&args) {
+            let dir = effective_cwd_through_globals(&args, idx);
+            snapshot::maybe_snapshot(&args, &dir, &home, &agent);
+        }
         exec_real_git(&args, None);
     }
 
@@ -272,6 +291,28 @@ fn shim_main() {
         cwd_is_foreign_repo(&binding),
     );
 
+    // #4: pre-destructive-op snapshot, BEFORE the op executes. Only actions
+    // that actually run something can destroy anything (Deny/SilentExempt
+    // never reach real git). Target dir mirrors exactly where the op is
+    // about to run: the bound worktree for ChdirPass/CleanupAndChdirPushPass,
+    // else the caller's own (possibly `-C`-redirected) cwd for Passthrough —
+    // snapshotting a different tree than the one about to be destroyed would
+    // be a lie. `snapshot::maybe_snapshot` itself no-ops in <1 argv scan for
+    // every non-destructive op (perf note) and is fail-open + loud on any
+    // internal error (see the issue's failure-policy contract).
+    match &action {
+        Action::ChdirPass(wt) | Action::CleanupAndChdirPushPass(wt) => {
+            snapshot::maybe_snapshot(&args, Path::new(wt), &home, &agent);
+        }
+        Action::Passthrough => {
+            if let Some(idx) = subcommand_index(&args) {
+                let dir = effective_cwd_through_globals(&args, idx);
+                snapshot::maybe_snapshot(&args, &dir, &home, &agent);
+            }
+        }
+        Action::SilentExempt { .. } | Action::Deny(_) => {}
+    }
+
     // #1463 (B): on every ChdirPass, strip the caller's leading global target
     // overrides (`-C` / `--git-dir` / `--work-tree`) so the shim's own
     // `-C <worktree>` is authoritative. Passthrough is left verbatim (the
@@ -329,6 +370,25 @@ fn shim_main() {
                     &agent,
                     subcommand,
                     "deny_protected_ref",
+                    None,
+                    Some(&reason),
+                );
+                std::process::exit(1);
+            }
+            // #4 Δa v5: the snapshot namespace must be shim-unpushable — a
+            // "private" ref namespace is not private to `git push`. Two
+            // cheap layers (text substring + resolved commit-tip match);
+            // fail-closed like the other push denylists above. See
+            // `snapshot::snapshot_push_violation` for the full contract
+            // (and its documented, deliberate non-goal: this is accident /
+            // casual-explicit prevention, not an exfiltration boundary).
+            if let Some(reason) = snapshot::snapshot_push_violation(&args, &worktree) {
+                emit_deny_error(subcommand, &reason, &agent, Some(&binding));
+                write_git_event_typed(
+                    &home,
+                    &agent,
+                    subcommand,
+                    "deny_snapshot_ref_push",
                     None,
                     Some(&reason),
                 );
@@ -2510,8 +2570,13 @@ impl Disposition {
 /// advisory); `disposition_for_covers_all_emitted_event_types_2379` pins every real type.
 fn disposition_for(event_type: &str) -> Disposition {
     match event_type {
-        "deny" | "deny_trust_root" | "deny_protected_ref" => Disposition::Deny,
-        "cwd_worktree_drift" | "git_conflict" => Disposition::Warn,
+        "deny" | "deny_trust_root" | "deny_protected_ref" | "deny_snapshot_ref_push" => {
+            Disposition::Deny
+        }
+        // #4: a snapshot failure is advisory, never terminal — the op still
+        // ran (fail-open is the whole point); the agent should heed the
+        // warning but is not blocked.
+        "cwd_worktree_drift" | "git_conflict" | "snapshot_failed" => Disposition::Warn,
         "post_merge_cleanup_exempt" => Disposition::Info,
         _ => Disposition::Deny,
     }

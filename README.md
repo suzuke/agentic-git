@@ -124,6 +124,7 @@ changes**:
 | `AGENTIC_GIT_BYPASS_UNTIL` | `AGEND_GIT_BYPASS_UNTIL` | time-boxed bypass (unix epoch) |
 | `AGENTIC_GIT_SHIM_DEPTH` | `AGEND_GIT_SHIM_DEPTH` | recursion-guard sentinel (internal) |
 | `AGENTIC_GIT_ALLOW_CANONICAL_MUTATE` | `AGEND_GIT_ALLOW_CANONICAL_MUTATE` | canonical-repo escape hatch |
+| `AGENTIC_GIT_SNAPSHOTS` | `AGEND_GIT_SNAPSHOTS` | pre-destructive-op recovery snapshots (`=1` to enable; default off in raw shim mode, on by default inside `run` sessions; `=0`/`off` force-disables) |
 
 On-disk contract (also unchanged from upstream): `runtime/<agent>/binding.json`
 + `.sig` · `.config-integrity-key` (32-byte HMAC key, 0600) ·
@@ -144,10 +145,20 @@ packaging. Known rough edges:
 
 - Some deny-message remedies still name agend-terminal MCP tools
   (`bind_self`, `binding_state`) — being generalized.
-- No standalone provisioning yet (`run` session mode is the top item).
-- Planned next, in order: **session mode** → **pre-destructive-op snapshots**
-  (auto-snapshot the worktree into a private ref before `reset --hard` /
-  `clean -fdx`, with an operator restore) → richer `policy.toml`.
+- **Recovery layer (done):** before a destructive op (`reset --hard`,
+  `clean -f*`, `checkout -- <paths>`/`-f`, `restore` (worktree form),
+  `switch -f`/`--discard-changes`, `stash drop|clear`,
+  `merge`/`rebase`/`pull`/`cherry-pick`/`revert`/`am`)
+  runs in a git work tree, the shim snapshots the tree into a private
+  `refs/agentic-git/snapshots/<who>/…` ref first (skipped when clean;
+  fails open + loud, never blocks the op). The snapshot namespace is itself
+  guarded against being pushed. Restore is manual in v1:
+  `git checkout <snapshot-ref> -- .`. Manage refs with
+  `agentic-git snapshots list|prune [--repo <path>]`. Off by default in raw
+  shim mode (`AGENTIC_GIT_SNAPSHOTS=1` to enable); on by default inside
+  `run` sessions.
+- Planned next: richer `policy.toml` (TTL/op-list config, currently
+  hardcoded defaults + flags) and a `snapshots restore` convenience command.
 
 ## License
 

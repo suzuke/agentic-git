@@ -28,6 +28,7 @@ pub fn cli_main() -> ! {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("run") => run_cmd(&args[1..]),
+        Some("snapshots") => snapshots_cmd(&args[1..]),
         Some("version") => {
             println!("agentic-git {} (cli)", env!("CARGO_PKG_VERSION"));
             std::process::exit(0);
@@ -51,9 +52,150 @@ fn print_usage(bad: Option<&str>) {
     eprintln!(
         "Usage:\n  \
          agentic-git run [--agent <name>] [--branch <branch>] [--base <ref>] -- <cmd...>\n  \
+         agentic-git snapshots list [--repo <path>]\n  \
+         agentic-git snapshots prune [--older-than <N>d] [--repo <path>]\n  \
          agentic-git version\n\n\
          To use the shim, invoke via <home>/bin/git (see README)."
     );
+}
+
+// ── `snapshots` (issue #4 P2 recovery layer) ────────────────────────────
+
+fn print_snapshots_usage() {
+    eprintln!(
+        "Usage:\n  \
+         agentic-git snapshots list [--repo <path>]\n  \
+         agentic-git snapshots prune [--older-than <N>d] [--repo <path>]\n\n\
+         Restore is manual in v1: git checkout <snapshot-ref> -- ."
+    );
+}
+
+fn snapshots_cmd(args: &[String]) -> ! {
+    match args.first().map(String::as_str) {
+        Some("list") => snapshots_list_cmd(&args[1..]),
+        Some("prune") => snapshots_prune_cmd(&args[1..]),
+        Some(other) => {
+            eprintln!("agentic-git: snapshots: unknown subcommand `{other}`");
+            print_snapshots_usage();
+            std::process::exit(2);
+        }
+        None => {
+            eprintln!("agentic-git: snapshots: no subcommand given");
+            print_snapshots_usage();
+            std::process::exit(2);
+        }
+    }
+}
+
+fn parse_repo_flag(args: &[String], caller: &str) -> Result<PathBuf, String> {
+    let mut i = 0;
+    let mut repo: Option<PathBuf> = None;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--repo" => {
+                i += 1;
+                let v = args.get(i).ok_or("`--repo` requires a value")?;
+                repo = Some(PathBuf::from(v));
+            }
+            other => return Err(format!("unknown flag `{other}` for `{caller}`")),
+        }
+        i += 1;
+    }
+    Ok(repo.unwrap_or_else(|| PathBuf::from(".")))
+}
+
+fn parse_prune_args(args: &[String]) -> Result<(PathBuf, u64), String> {
+    let mut i = 0;
+    let mut repo: Option<PathBuf> = None;
+    let mut ttl_secs = super::snapshot::DEFAULT_TTL_SECS;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--repo" => {
+                i += 1;
+                let v = args.get(i).ok_or("`--repo` requires a value")?;
+                repo = Some(PathBuf::from(v));
+            }
+            "--older-than" => {
+                i += 1;
+                let v = args.get(i).ok_or("`--older-than` requires a value")?;
+                ttl_secs = parse_older_than(v)?;
+            }
+            other => return Err(format!("unknown flag `{other}` for `snapshots prune`")),
+        }
+        i += 1;
+    }
+    Ok((repo.unwrap_or_else(|| PathBuf::from(".")), ttl_secs))
+}
+
+/// `<N>d` (days) — the only unit the issue's CLI surface specifies.
+fn parse_older_than(s: &str) -> Result<u64, String> {
+    let days_str = s
+        .strip_suffix(['d', 'D'])
+        .ok_or_else(|| format!("`--older-than` value {s:?} must look like `<N>d`"))?;
+    let days: u64 = days_str
+        .parse()
+        .map_err(|_| format!("`--older-than` value {s:?} must look like `<N>d`"))?;
+    Ok(days * 24 * 60 * 60)
+}
+
+fn snapshots_list_cmd(args: &[String]) -> ! {
+    let repo = match parse_repo_flag(args, "snapshots list") {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("agentic-git: snapshots list: {e}");
+            print_snapshots_usage();
+            std::process::exit(2);
+        }
+    };
+    let git = super::resolve_real_git();
+    match super::snapshot::list_snapshots(&git, &repo) {
+        Ok(rows) => {
+            if rows.is_empty() {
+                println!("(no snapshots)");
+            } else {
+                println!(
+                    "{:<58} {:<21} {:<12} {:<12} SUBJECT",
+                    "REF", "WHEN", "OP", "WHO"
+                );
+                for r in rows {
+                    println!(
+                        "{:<58} {:<21} {:<12} {:<12} {}",
+                        r.refname, r.when, r.op, r.who, r.subject
+                    );
+                }
+            }
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("agentic-git: snapshots list: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn snapshots_prune_cmd(args: &[String]) -> ! {
+    let (repo, ttl_secs) = match parse_prune_args(args) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("agentic-git: snapshots prune: {e}");
+            print_snapshots_usage();
+            std::process::exit(2);
+        }
+    };
+    let git = super::resolve_real_git();
+    match super::snapshot::prune_refs(&git, &repo, ttl_secs, None) {
+        Ok(pruned) => {
+            for r in &pruned {
+                println!("pruned {r}");
+            }
+            println!("{} snapshot ref(s) pruned", pruned.len());
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("agentic-git: snapshots prune: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 // ── `run` argument parsing (hand-rolled — no clap, dependency discipline) ──
@@ -543,6 +685,16 @@ fn spawn_agent(cmd: &[String], worktree: &Path, home: &Path, agent: &str, real_g
         .env("AGENTIC_GIT_AGENT", agent)
         .env("AGENTIC_GIT_REAL_GIT", real_git);
 
+    // #4 Δc: `run` opts standalone sessions INTO the recovery-layer snapshot
+    // net by default — but never override an explicit user setting (either
+    // env name): `AGENTIC_GIT_SNAPSHOTS=0|off` must still force-disable
+    // inside a run session. `env_compat` checks both the primary AND legacy
+    // name in THIS process's own (inherited) environment, so injecting `=1`
+    // only when it's unset can never clobber a user's `=0`.
+    if super::env_compat("AGENTIC_GIT_SNAPSHOTS").is_err() {
+        child.env("AGENTIC_GIT_SNAPSHOTS", "1");
+    }
+
     match child.status() {
         Ok(status) => {
             #[cfg(unix)]
@@ -705,10 +857,12 @@ fn run_cmd(raw_args: &[String]) -> ! {
     // child's exit code — the work must outlive the agent.
     eprintln!(
         "\nagentic-git: session ended (exit {code}).\n  \
-         worktree: {}\n  \
-         branch:   {branch}\n  \
-         re-enter: cd {} && git status\n  \
-         remove:   git -C {} worktree remove {} && rm -rf {}",
+         worktree:  {}\n  \
+         branch:    {branch}\n  \
+         snapshots: pre-destructive-op safety net is ON by default in `run` sessions \
+         (AGENTIC_GIT_SNAPSHOTS=0 to disable; `agentic-git snapshots list/prune` to inspect)\n  \
+         re-enter:  cd {} && git status\n  \
+         remove:    git -C {} worktree remove {} && rm -rf {}",
         wt_path.display(),
         wt_path.display(),
         source_repo.display(),

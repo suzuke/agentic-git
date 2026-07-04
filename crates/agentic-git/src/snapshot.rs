@@ -1,0 +1,627 @@
+//! P2 recovery layer (agentic-git issue #4): a pre-destructive-op safety
+//! net, rebuilt on plain git plumbing (jj's auto-snapshot idea, without
+//! leaving git). Implements the issue's FINAL contract literally — base
+//! design + Δa **v5** (push guard, re-scoped to two cheap layers + an
+//! honest boundary) + Δb (HEAD-less commit-tree) + Δc (default-off
+//! activation, `run` opts in) + Δd (forced snapshot dates, self-prune
+//! immunity) + Δe (content-level semantics) — where later review rounds
+//! superseded earlier ones, only the final spelling is implemented here.
+//!
+//! Positioning (hard constraint, carried from the issue): this is a safety
+//! net, not a gate. Snapshot **creation** fails open (never blocks the git
+//! op it's protecting against); the push **guard** stays fail-closed
+//! (prevention, mirrors the existing trust-root/protected-ref denylists).
+
+use std::collections::HashSet;
+use std::path::Path;
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use super::{env_compat, resolve_real_git, subcommand_index, write_git_event_typed};
+
+/// Amortized + manual prune default TTL (Δd: committer-date based).
+pub(crate) const DEFAULT_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+
+const SNAPSHOT_REF_PREFIX: &str = "refs/agentic-git/snapshots/";
+
+fn git_bypass(git: &str) -> Command {
+    let mut cmd = Command::new(git);
+    // Mirrors the existing pattern (`cleanup_init_pile_pre_push` et al.): all
+    // child git calls use the resolved real git + BOTH bypass env twins so
+    // they never re-enter this shim.
+    cmd.env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1");
+    cmd
+}
+
+// ── Destructive-op classification (v1 list) ─────────────────────────────
+
+/// Resolve the destructive-op slug for a raw shim `args` vector, or `None`
+/// if this invocation is not in the v1 destructive set. Reuses
+/// `subcommand_index` (main.rs) to find the real subcommand past any
+/// leading global options — the same approach `strip_target_overrides`
+/// takes — so e.g. `-C <dir> reset --hard` classifies correctly, not just
+/// the bare form.
+pub(crate) fn destructive_op_slug(args: &[String]) -> Option<&'static str> {
+    let idx = subcommand_index(args)?;
+    let subcmd = args[idx].as_str();
+    let rest = &args[idx + 1..];
+    match subcmd {
+        // Mid-op manglers — the v1 table's set (unconditional; these can
+        // leave half-applied state regardless of flags).
+        "merge" => Some("merge"),
+        "rebase" => Some("rebase"),
+        "pull" => Some("pull"),
+        "cherry-pick" => Some("cherry-pick"),
+        "revert" => Some("revert"),
+        "am" => Some("am"),
+        // Working-tree discard forms.
+        "reset" if reset_is_destructive(rest) => Some("reset"),
+        "clean" if clean_is_forced(rest) => Some("clean"),
+        "stash" if stash_is_destructive(rest) => Some("stash"),
+        "checkout" if checkout_is_destructive(rest) => Some("checkout"),
+        "restore" if restore_touches_worktree(rest) => Some("restore"),
+        "switch" if switch_is_destructive(rest) => Some("switch"),
+        _ => None,
+    }
+}
+
+fn reset_is_destructive(rest: &[String]) -> bool {
+    rest.iter()
+        .any(|a| matches!(a.as_str(), "--hard" | "--merge" | "--keep"))
+}
+
+/// `clean` with `-f` in any combination (`-fd`, `-fdx`, …) or `--force`.
+fn clean_is_forced(rest: &[String]) -> bool {
+    rest.iter().any(|a| {
+        a == "--force" || (a.starts_with('-') && !a.starts_with("--") && a[1..].contains('f'))
+    })
+}
+
+/// `stash drop|clear` — the destructive stash forms (drops working-tree-
+/// recoverable state); `push`/`pop`/`list`/`show`/apply are not.
+fn stash_is_destructive(rest: &[String]) -> bool {
+    matches!(rest.first().map(String::as_str), Some("drop") | Some("clear"))
+}
+
+/// `checkout` has a large worktree-overwriting surface (`-- <paths>`, `-f`,
+/// `<path>`, `<tree-ish> <path>`, `-p`, `--ours`/`--theirs <path>`,
+/// `--pathspec-from-file=<f>`, …). Two rounds of impl review showed that
+/// enumerating the *destructive* flag set is a losing game (each round found
+/// another spelling: `checkout HEAD f.txt`, then `--pathspec-from-file`). So —
+/// exactly as the push guard was re-scoped — checkout uses the **fail-safe
+/// default**: a checkout that reaches this hook is treated as destructive
+/// UNLESS it is a pure branch-creation (`-b`/`-B`/`--orphan`, no force). For a
+/// recovery net the asymmetry is deliberate: an over-snapshot is a wasted ref
+/// (pruned in 7d, and only ever taken on a DIRTY tree via skip-when-clean),
+/// whereas an under-snapshot is lost work. Cross-branch `checkout <branch>` is
+/// denied upstream and never reaches here; same-branch is a harmless no-op.
+fn checkout_is_destructive(rest: &[String]) -> bool {
+    // `git checkout` with no arguments errors — nothing runs, nothing to save.
+    if rest.is_empty() {
+        return false;
+    }
+    if rest.iter().any(|a| a == "--" || a == "-f" || a == "--force") {
+        return true;
+    }
+    // Pure branch creation does not discard worktree content (a dirty tree is
+    // carried onto the new branch). Everything else that reaches the hook
+    // touches the worktree — snapshot it.
+    let branch_create = rest
+        .iter()
+        .any(|a| a == "-b" || a == "-B" || a == "--orphan");
+    !branch_create
+}
+
+/// `restore` overwrites the WORKING TREE unless it is a pure `--staged`
+/// (index-only) form. `--staged --worktree` together still touch the
+/// worktree, so only a `--staged` WITHOUT `--worktree` is exempt.
+fn restore_touches_worktree(rest: &[String]) -> bool {
+    let staged = rest.iter().any(|a| a == "--staged" || a == "-S");
+    let worktree = rest.iter().any(|a| a == "--worktree" || a == "-W");
+    !staged || worktree
+}
+
+/// `switch -f`/`--force`/`--discard-changes` discards uncommitted worktree
+/// changes. Verified empirically: `git switch --discard-changes <current>`
+/// resets the tree to the branch tip even when already on that branch — a
+/// reachable working-tree-discard that a cross-branch deny does NOT catch (a
+/// bound agent may run it against its OWN branch). Plain `switch <branch>`
+/// that would clobber changes is refused by git (not destructive), so only
+/// the force/discard forms qualify. (Self-review addendum: the v1 op table
+/// said "checkout/restore" but switch's discard form is the same worktree
+/// hazard.)
+fn switch_is_destructive(rest: &[String]) -> bool {
+    rest.iter()
+        .any(|a| matches!(a.as_str(), "-f" | "--force" | "--discard-changes"))
+}
+
+// ── Activation (Δc) ─────────────────────────────────────────────────────
+
+/// Δc: default OFF in raw shim mode; `run` (cli.rs) injects `=1` into its
+/// child's env unless the user already set either env name, so `=0|off`
+/// still force-disables inside a run session. Legacy twin
+/// `AGEND_GIT_SNAPSHOTS` resolved automatically via `env_compat`.
+fn snapshots_enabled() -> bool {
+    env_compat("AGENTIC_GIT_SNAPSHOTS")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false)
+}
+
+// ── Snapshot creation (fail-open) ───────────────────────────────────────
+
+/// Entry point invoked from the shim dispatch BEFORE a destructive op
+/// executes. Fails open + loud on any internal error — this must NEVER
+/// block the op it is protecting against.
+pub(crate) fn maybe_snapshot(args: &[String], target_dir: &Path, home: &str, agent: &str) {
+    // Cheap check FIRST — a non-destructive op costs nothing beyond a pure
+    // argv scan (perf note in the issue).
+    let Some(op_slug) = destructive_op_slug(args) else {
+        return;
+    };
+    if !snapshots_enabled() {
+        return;
+    }
+    let git = resolve_real_git();
+    if is_clean(&git, target_dir) {
+        // Skip-when-clean fast path: nothing uncommitted to lose.
+        return;
+    }
+    match create_snapshot(&git, target_dir, agent, op_slug) {
+        Ok(refname) => {
+            // Amortized prune (Δd): piggyback on this rare event, exclude
+            // the ref just created.
+            let _ = prune_refs(&git, target_dir, DEFAULT_TTL_SECS, Some(refname.as_str()));
+        }
+        Err(reason) => {
+            eprintln!(
+                "agentic-git: warning \u{2014} pre-op snapshot FAILED ({reason}); proceeding \
+                 without a safety net"
+            );
+            // Best-effort telemetry: only when we have a home to write it to.
+            // The solo-opt-in path (no AGENTIC_GIT_HOME) still snapshots — it
+            // just can't journal a failure. An empty home would otherwise
+            // land `fleet_events.jsonl` in the user's cwd.
+            if !home.is_empty() {
+                write_git_event_typed(home, agent, op_slug, "snapshot_failed", None, Some(&reason));
+            }
+        }
+    }
+}
+
+fn is_clean(git: &str, dir: &Path) -> bool {
+    git_bypass(git)
+        .arg("-C")
+        .arg(dir)
+        .args(["status", "--porcelain"])
+        .output()
+        .map(|o| o.status.success() && o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+fn who_for(agent: &str) -> &str {
+    if agent.is_empty() {
+        "noagent"
+    } else {
+        agent
+    }
+}
+
+fn nanos_now() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+/// The current time in git's "ident date" grammar (`@<unix-epoch> <tz>`),
+/// the format `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` require — NOT the
+/// free-form `--date` approxidate parser, which is the only place the
+/// literal `now` is special-cased. Always UTC (`+0000`) — the snapshot's
+/// displayed tz doesn't matter, only that its instant is genuinely now.
+fn now_ident_date() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("@{secs} +0000")
+}
+
+fn create_snapshot(git: &str, dir: &Path, agent: &str, op_slug: &str) -> Result<String, String> {
+    let who = who_for(agent);
+    let tmp_index = std::env::temp_dir().join(format!(
+        "agentic-git-snapshot-index-{}-{}",
+        std::process::id(),
+        nanos_now()
+    ));
+    let result = create_snapshot_inner(git, dir, who, op_slug, &tmp_index);
+    let _ = std::fs::remove_file(&tmp_index);
+    result
+}
+
+fn create_snapshot_inner(
+    git: &str,
+    dir: &Path,
+    who: &str,
+    op_slug: &str,
+    tmp_index: &Path,
+) -> Result<String, String> {
+    // 1. `add -A` into a private temp index — never touches the real index.
+    let add = git_bypass(git)
+        .arg("-C")
+        .arg(dir)
+        .env("GIT_INDEX_FILE", tmp_index)
+        .args(["add", "-A"])
+        .output()
+        .map_err(|e| format!("spawn `add -A`: {e}"))?;
+    if !add.status.success() {
+        return Err(format!(
+            "`add -A` failed: {}",
+            String::from_utf8_lossy(&add.stderr).trim()
+        ));
+    }
+
+    // 2. `write-tree` from that same temp index.
+    let wt = git_bypass(git)
+        .arg("-C")
+        .arg(dir)
+        .env("GIT_INDEX_FILE", tmp_index)
+        .args(["write-tree"])
+        .output()
+        .map_err(|e| format!("spawn `write-tree`: {e}"))?;
+    if !wt.status.success() {
+        return Err(format!(
+            "`write-tree` failed: {}",
+            String::from_utf8_lossy(&wt.stderr).trim()
+        ));
+    }
+    let tree = String::from_utf8_lossy(&wt.stdout).trim().to_string();
+    if tree.is_empty() {
+        return Err("`write-tree` produced no tree SHA".to_string());
+    }
+
+    // 3. Δb: omit `-p HEAD` when HEAD is unborn (parented form fatals on a
+    //    first-commit repo — exactly when the net matters most).
+    let head_sha = git_bypass(git)
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--verify", "-q", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    // Δd: force author/committer date to NOW, overriding any ambient
+    // GIT_AUTHOR_DATE/GIT_COMMITTER_DATE (our OWN test fixtures set such
+    // vars) so a brand-new snapshot never looks pre-expired to the
+    // amortized prune below. `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` use
+    // git's strict "ident date" grammar, NOT the free-form `--date`
+    // approxidate parser — the literal `now` is rejected there
+    // (`fatal: invalid date format: now`), so this spells it out as
+    // `@<unix-epoch> +0000` (UTC), which that grammar does accept.
+    let mut commit_cmd = git_bypass(git);
+    commit_cmd
+        .arg("-C")
+        .arg(dir)
+        .env("GIT_AUTHOR_DATE", now_ident_date())
+        .env("GIT_COMMITTER_DATE", now_ident_date())
+        .arg("commit-tree")
+        .arg(&tree);
+    if let Some(ref parent) = head_sha {
+        commit_cmd.arg("-p").arg(parent);
+    }
+    commit_cmd.args(["-m", &format!("{op_slug} snapshot")]);
+    let commit_out = commit_cmd
+        .output()
+        .map_err(|e| format!("spawn `commit-tree`: {e}"))?;
+    if !commit_out.status.success() {
+        return Err(format!(
+            "`commit-tree` failed: {}",
+            String::from_utf8_lossy(&commit_out.stderr).trim()
+        ));
+    }
+    let commit_sha = String::from_utf8_lossy(&commit_out.stdout).trim().to_string();
+    if commit_sha.is_empty() {
+        return Err("`commit-tree` produced no commit SHA".to_string());
+    }
+
+    // 4. `update-ref` into a unique, ref-name-safe slot.
+    let utc_ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let refname = unique_ref_name(git, dir, who, &utc_ts, op_slug)
+        .ok_or_else(|| "could not find a free snapshot ref slot".to_string())?;
+    let update = git_bypass(git)
+        .arg("-C")
+        .arg(dir)
+        .args(["update-ref", &refname, &commit_sha])
+        .output()
+        .map_err(|e| format!("spawn `update-ref`: {e}"))?;
+    if !update.status.success() {
+        return Err(format!(
+            "`update-ref` failed: {}",
+            String::from_utf8_lossy(&update.stderr).trim()
+        ));
+    }
+    Ok(refname)
+}
+
+/// `<who>` is ref-name-safe by construction (agent name already
+/// charset-validated, or the literal `noagent`); `<seq>` disambiguates the
+/// rare same-second collision.
+fn snapshot_ref_name(who: &str, utc_ts: &str, seq: u64, op_slug: &str) -> String {
+    format!("{SNAPSHOT_REF_PREFIX}{who}/{utc_ts}-{seq}-{op_slug}")
+}
+
+fn ref_exists(git: &str, dir: &Path, refname: &str) -> bool {
+    git_bypass(git)
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--verify", "--quiet", refname])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn unique_ref_name(git: &str, dir: &Path, who: &str, utc_ts: &str, op_slug: &str) -> Option<String> {
+    for seq in 0..1000u64 {
+        let candidate = snapshot_ref_name(who, utc_ts, seq, op_slug);
+        if !ref_exists(git, dir, &candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Parse `who`/`op` back out of a snapshot ref's own name (authoritative —
+/// we control the format). `None` if `refname` isn't one of ours.
+fn parse_snapshot_ref(refname: &str) -> Option<(String, String)> {
+    let rest = refname.strip_prefix(SNAPSHOT_REF_PREFIX)?;
+    let (who, tail) = rest.split_once('/')?;
+    // tail = "<utc-ts>-<seq>-<op-slug>"; op-slug may itself contain dashes
+    // (`cherry-pick`), so split only the first two.
+    let mut parts = tail.splitn(3, '-');
+    let _ts = parts.next()?;
+    let _seq = parts.next()?;
+    let op = parts.next()?;
+    Some((who.to_string(), op.to_string()))
+}
+
+// ── Prune (lazy, no daemon) ──────────────────────────────────────────────
+
+/// Delete snapshot refs under `refs/agentic-git/` older than `ttl_secs`
+/// (committer-date based), excluding `exclude_ref` if given (Δd: belt and
+/// suspenders against the amortized pass pruning the ref it just created).
+/// Best-effort: any spawn/parse failure for the LISTING is a hard `Err`
+/// (nothing to prune, nothing lost); a single ref's delete failing is
+/// silently skipped (not reported as pruned) rather than aborting the pass.
+pub(crate) fn prune_refs(
+    git: &str,
+    dir: &Path,
+    ttl_secs: u64,
+    exclude_ref: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let out = git_bypass(git)
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "for-each-ref",
+            "--format=%(committerdate:unix) %(refname)",
+            "refs/agentic-git/",
+        ])
+        .output()
+        .map_err(|e| format!("spawn `for-each-ref`: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "`for-each-ref` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let mut pruned = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut it = line.splitn(2, ' ');
+        let (Some(ts_str), Some(refname)) = (it.next(), it.next()) else {
+            continue;
+        };
+        if exclude_ref == Some(refname) {
+            continue;
+        }
+        let Ok(ts) = ts_str.trim().parse::<i64>() else {
+            continue;
+        };
+        let age = now.saturating_sub(ts.max(0) as u64);
+        if age <= ttl_secs {
+            continue;
+        }
+        let deleted = git_bypass(git)
+            .arg("-C")
+            .arg(dir)
+            .args(["update-ref", "-d", refname])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if deleted {
+            pruned.push(refname.to_string());
+        }
+    }
+    Ok(pruned)
+}
+
+// ── CLI surface (list / prune) ──────────────────────────────────────────
+
+pub(crate) struct SnapshotRow {
+    pub(crate) refname: String,
+    pub(crate) when: String,
+    pub(crate) op: String,
+    pub(crate) who: String,
+    pub(crate) subject: String,
+}
+
+pub(crate) fn list_snapshots(git: &str, dir: &Path) -> Result<Vec<SnapshotRow>, String> {
+    let out = git_bypass(git)
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "for-each-ref",
+            "--format=%(refname)%09%(committerdate:iso-strict)%09%(subject)",
+            SNAPSHOT_REF_PREFIX,
+        ])
+        .output()
+        .map_err(|e| format!("spawn `for-each-ref`: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "`for-each-ref` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let mut rows = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut parts = line.splitn(3, '\t');
+        let refname = parts.next().unwrap_or_default().to_string();
+        let when = parts.next().unwrap_or_default().to_string();
+        let subject = parts.next().unwrap_or_default().to_string();
+        let (who, op) = parse_snapshot_ref(&refname).unwrap_or_default();
+        rows.push(SnapshotRow {
+            refname,
+            when,
+            op,
+            who,
+            subject,
+        });
+    }
+    Ok(rows)
+}
+
+// ── Push guard (Δa v5) ──────────────────────────────────────────────────
+
+/// Δa v5 — two cheap layers, re-scoped after 4 rounds of "another refspec
+/// spelling evades the parser" (see the issue's Design v5 for the full
+/// rationale on why this does NOT attempt to be an exfiltration boundary —
+/// it stops accidental/casual-explicit leaks, which is all a same-uid,
+/// bypassable-by-construction shim can honestly claim). Returns an
+/// actionable deny reason (tagged `SNAPSHOT_REF_PUSH`), or `None` to allow.
+pub(crate) fn snapshot_push_violation(args: &[String], worktree: &str) -> Option<String> {
+    // Layer 1 — text: any refspec side containing the substring
+    // `agentic-git/` (after stripping a leading `+`), or `--mirror`.
+    if push_carries_mirror(args) {
+        return Some(
+            "SNAPSHOT_REF_PUSH: `--mirror` pushes EVERY ref, including the agentic-git \
+             snapshot namespace — push an explicit refspec of your own branch instead."
+                .to_string(),
+        );
+    }
+    for side in push_refspec_sides(args) {
+        if side.contains("agentic-git/") {
+            return Some(format!(
+                "SNAPSHOT_REF_PUSH: refspec `{side}` references the agentic-git snapshot \
+                 namespace (refs/agentic-git/…) — snapshot refs are a local safety net, not \
+                 for a shared remote. Drop it from the refspec and retry."
+            ));
+        }
+    }
+
+    // Layer 2 — commit: any resolvable src whose commit tip IS a snapshot
+    // (launder-into-branch, `^{}`/`~0` peels, a raw snapshot SHA typed
+    // directly). Skipped entirely (never a false negative vs. layer 1) when
+    // real git can't run at all, or when there are no snapshot refs yet.
+    let git = resolve_real_git();
+    let snapshot_tips = snapshot_tip_shas(&git, worktree);
+    if snapshot_tips.is_empty() {
+        return None;
+    }
+    for src in push_refspec_srcs(args) {
+        if let Some(sha) = resolve_commit(&git, worktree, &src) {
+            if snapshot_tips.contains(&sha) {
+                return Some(format!(
+                    "SNAPSHOT_REF_PUSH: push source `{src}` resolves to a snapshot commit \
+                     ({sha}) — snapshot content is a local safety net, not for a shared \
+                     remote. Push your own branch content instead."
+                ));
+            }
+        }
+    }
+    None
+}
+
+fn push_carries_mirror(args: &[String]) -> bool {
+    args.iter().skip(1).any(|a| match a.strip_prefix("--") {
+        Some(name) if !name.is_empty() => "mirror".starts_with(name),
+        _ => false,
+    })
+}
+
+/// Every refspec SIDE (both halves of a `src:dst` positional, or the bare
+/// token when there is no `:`), leading `+` stripped. Flags are skipped.
+fn push_refspec_sides(args: &[String]) -> Vec<String> {
+    args.iter()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .flat_map(|a| {
+            let a = a.strip_prefix('+').unwrap_or(a);
+            a.split(':').map(str::to_string).collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The SRC half of every positional refspec (before the first `:`, or the
+/// whole token when there is no `:`), leading `+` stripped, empty (a
+/// delete-form `:dst`) skipped.
+fn push_refspec_srcs(args: &[String]) -> Vec<String> {
+    args.iter()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .filter_map(|a| {
+            let a = a.strip_prefix('+').unwrap_or(a);
+            let src = a.split(':').next().unwrap_or(a);
+            if src.is_empty() {
+                None
+            } else {
+                Some(src.to_string())
+            }
+        })
+        .collect()
+}
+
+fn resolve_commit(git: &str, worktree: &str, src: &str) -> Option<String> {
+    let spec = format!("{src}^{{commit}}");
+    let out = git_bypass(git)
+        .args(["-C", worktree, "rev-parse", "--verify", &spec])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha)
+    }
+}
+
+fn snapshot_tip_shas(git: &str, worktree: &str) -> HashSet<String> {
+    let out = git_bypass(git)
+        .args([
+            "-C",
+            worktree,
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/agentic-git/",
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => HashSet::new(),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests;

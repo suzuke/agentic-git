@@ -618,11 +618,12 @@ pub(crate) fn restore_snapshot(
         Some(create_snapshot(git, dir, opts.agent, "restore").map_err(RestoreError::PreRestoreFailed)?)
     };
 
-    checkout_paths(git, dir, &refname, &changed).map_err(RestoreError::Git)?;
+    let pathspec = join_nul(&changed);
+    checkout_paths(git, dir, &refname, &pathspec).map_err(RestoreError::Git)?;
     if !opts.staged {
         // Best-effort: the files ARE recovered; a failure to unstage is a
         // cosmetic index nuisance, not a reason to fail a successful recovery.
-        if let Err(e) = unstage_paths(git, dir, &changed) {
+        if let Err(e) = unstage_paths(git, dir, &pathspec) {
             eprintln!(
                 "agentic-git: warning \u{2014} restored files are staged; could not unstage ({e})"
             );
@@ -686,8 +687,10 @@ fn ref_committerdate(git: &str, dir: &Path, refname: &str) -> String {
 /// the current working tree, EXCLUDING paths added since the snapshot (`A` —
 /// newer files we must never delete). Because the snapshot committed untracked
 /// files into its tree (`add -A`), a file lost from the working tree shows up
-/// here as `D` and is recovered. `-z` keeps paths with spaces/newlines intact.
-fn restore_changed_paths(git: &str, dir: &Path, refname: &str) -> Result<Vec<String>, String> {
+/// here as `D` and is recovered. `-z` keeps paths with spaces/newlines intact;
+/// each path is kept as RAW BYTES (never lossily decoded) so a non-UTF-8
+/// filename round-trips unchanged into the pathspec fed back to git.
+fn restore_changed_paths(git: &str, dir: &Path, refname: &str) -> Result<Vec<Vec<u8>>, String> {
     let out = git_bypass(git)
         .arg("-C")
         .arg(dir)
@@ -707,46 +710,84 @@ fn restore_changed_paths(git: &str, dir: &Path, refname: &str) -> Result<Vec<Str
         if status.first() == Some(&b'A') {
             continue;
         }
-        paths.push(String::from_utf8_lossy(path).into_owned());
+        paths.push(path.to_vec());
     }
     Ok(paths)
 }
 
-fn checkout_paths(git: &str, dir: &Path, refname: &str, paths: &[String]) -> Result<(), String> {
-    let out = git_bypass(git)
-        .arg("-C")
-        .arg(dir)
-        .args(["checkout", refname, "--"])
-        .args(paths)
-        .output()
-        .map_err(|e| format!("spawn `checkout`: {e}"))?;
+/// NUL-join pathspecs for `--pathspec-file-nul` (each entry terminated by NUL).
+fn join_nul(paths: &[Vec<u8>]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for p in paths {
+        buf.extend_from_slice(p);
+        buf.push(0);
+    }
+    buf
+}
+
+/// Feed `pathspec_nul` (NUL-separated raw path bytes) to a git command on
+/// stdin via `--pathspec-from-file=- --pathspec-file-nul`. This is the whole
+/// reason restore does NOT pass paths as argv: a large snapshot (a generated
+/// tree, a vendored dir — 10k+ files) would blow `ARG_MAX` (`E2BIG`) and
+/// restore ZERO files, exactly when recovery matters most. stdin has no such
+/// limit and one invocation handles any count. (fugu PR #10 review: repro'd
+/// with 60k paths.)
+fn run_pathspec_stdin(cmd: &mut Command, pathspec_nul: &[u8], label: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn `{label}`: {e}"))?;
+    // Take + write + drop the handle so its EOF unblocks the child before we
+    // wait (a held-open stdin would deadlock).
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| format!("`{label}`: no stdin pipe"))?
+        .write_all(pathspec_nul)
+        .map_err(|e| format!("`{label}` write stdin: {e}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("`{label}` wait: {e}"))?;
     if !out.status.success() {
         return Err(format!(
-            "`checkout` failed: {}",
+            "`{label}` failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
     Ok(())
+}
+
+fn checkout_paths(git: &str, dir: &Path, refname: &str, pathspec_nul: &[u8]) -> Result<(), String> {
+    run_pathspec_stdin(
+        git_bypass(git).arg("-C").arg(dir).args([
+            "checkout",
+            refname,
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+        ]),
+        pathspec_nul,
+        "checkout",
+    )
 }
 
 /// Undo `checkout`'s index side effect for exactly the restored paths, so the
 /// recovery lands in the working tree UNSTAGED. Scoped to the restored paths
 /// (not `reset -- .`) so any unrelated pre-existing staged content survives.
-fn unstage_paths(git: &str, dir: &Path, paths: &[String]) -> Result<(), String> {
-    let out = git_bypass(git)
-        .arg("-C")
-        .arg(dir)
-        .args(["reset", "-q", "--"])
-        .args(paths)
-        .output()
-        .map_err(|e| format!("spawn `reset`: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "`reset` failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(())
+fn unstage_paths(git: &str, dir: &Path, pathspec_nul: &[u8]) -> Result<(), String> {
+    run_pathspec_stdin(
+        git_bypass(git).arg("-C").arg(dir).args([
+            "reset",
+            "-q",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+        ]),
+        pathspec_nul,
+        "reset",
+    )
 }
 
 // ── Push guard (Δa v5) ──────────────────────────────────────────────────

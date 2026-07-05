@@ -1206,3 +1206,41 @@ fn restore_cli_is_nondestructive_and_undoable() {
     assert_eq!(std::fs::read_to_string(wt.join("README.md")).unwrap(), "CURRENT\n", "undo brings current work back");
     cleanup(&root);
 }
+
+// ── R7. large snapshot (many long paths) — no ARG_MAX / E2BIG (fugu #10) ──
+// A `clean -fd`-style loss of a big generated/vendored tree must be fully
+// recoverable. Passing every path as argv (the pre-fix approach) blew ARG_MAX
+// and restored ZERO files; restore now feeds pathspecs via stdin.
+#[test]
+fn restore_cli_handles_many_long_paths_without_argv_limit() {
+    let root = tempdir("restore-bulk");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let real_git = resolve_setup_real_git();
+    init_repo(&real_git, &repo);
+    let wt = worktree_of(&root, &real_git, &repo, "agent/rbulk");
+    let home = root.join("home");
+    write_binding(&home, "agent-rbk", "agent/rbulk", &wt);
+
+    let n = 5000usize;
+    let pad = "x".repeat(230);
+    // Total pathspec bytes must exceed a typical ARG_MAX (~1 MB on macOS).
+    assert!(n * (pad.len() + 15) > 1_100_000, "test must exceed ARG_MAX to be meaningful");
+    let bulk = wt.join("gen");
+    std::fs::create_dir_all(&bulk).unwrap();
+    for i in 0..n {
+        std::fs::write(bulk.join(format!("f{i:05}_{pad}.txt")), b"gen\n").unwrap();
+    }
+
+    let out = run_shim(&repo, &home, "agent-rbk", &real_git, &[("AGENTIC_GIT_SNAPSHOTS", "1")], &["reset", "--hard"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(snapshot_refs(&real_git, &repo).len(), 1);
+
+    // Lose the whole generated tree, then recover it in ONE command.
+    std::fs::remove_dir_all(&bulk).unwrap();
+    let r = run_cli(&wt, &real_git, &["snapshots", "restore"]);
+    assert!(r.status.success(), "bulk restore failed: {}", String::from_utf8_lossy(&r.stderr));
+    let restored = std::fs::read_dir(&bulk).map(|d| d.count()).unwrap_or(0);
+    assert_eq!(restored, n, "every file in the large snapshot must be recovered");
+    cleanup(&root);
+}

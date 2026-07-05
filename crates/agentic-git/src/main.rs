@@ -1447,22 +1447,17 @@ fn parent_process_name() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn parent_process_name() -> Option<String> {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-    let pid = sysinfo::Pid::from_u32(std::process::id());
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&[pid]),
-        true,
-        ProcessRefreshKind::nothing(),
-    );
-    let parent_pid = sys.process(pid)?.parent()?;
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&[parent_pid]),
-        true,
-        ProcessRefreshKind::nothing(),
-    );
-    sys.process(parent_pid)
-        .map(|p| p.name().to_string_lossy().to_string())
+    // Deliberately `None` on Windows. The original body reached for the
+    // `sysinfo` crate, but it was never declared as a dependency — so this has
+    // never compiled on Windows (the reason the advisory CI build was red).
+    // `None` is the SAFE degrade: `invocation_is_gh_post_merge` treats a lookup
+    // failure as "not a gh child" and lets the cross-branch fence fire exactly
+    // as it would without this optimization (see its doc — conservative by
+    // design, never weakens the fence). The gh-post-merge noise suppression
+    // just doesn't apply on Windows until this is reimplemented (Toolhelp32 via
+    // `windows-sys`, or `sysinfo` as a `cfg(windows)` dep) AND tested on a real
+    // Windows host — still an unverified platform.
+    None
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]

@@ -33,8 +33,13 @@ jobs:
   # status()+exit process replacement, case-insensitive dispatch) that have
   # never been publicly verified. Surface their real state WITHOUT gating
   # merges (continue-on-error) until Windows support is a committed target —
-  # a red here is information, not a blocker. Unix tests use symlinks/exec that
-  # this job's failures don't reflect on.
+  # a red here is information, not a blocker. This asserts what Windows CAN
+  # honestly check: the whole workspace BUILDS on Windows (the "can a Windows
+  # user get a working binary" signal) plus the cross-platform contract crate's
+  # tests. It does NOT run the shim's integration suite — those tests fake
+  # argv[0] via unix-only `CommandExt::arg0`/`std::os::unix`, so they can't even
+  # compile on Windows; porting them is a separate, committed-Windows-support
+  # effort.
   test-windows-advisory:
     runs-on: windows-latest
     continue-on-error: true
@@ -42,7 +47,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --workspace
-      - run: cargo test --workspace
+      - run: cargo test -p agentic-git-core
 
   # Δ5 / INVARIANT clause 5 (agentic-git issue #1, session mode): the
   # zero-daemon-change adoption guarantee is a REQUIRED job, not a manual

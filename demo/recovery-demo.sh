@@ -97,7 +97,7 @@ printf "the tricky part was the off-by-one at the boundary\n" > NOTES.md
 # ...then makes a classic machine-speed mistake: wipes the slate to "start clean"
 git reset --hard >/dev/null 2>&1             # erases the solver.py fix
 rm -f NOTES.md                               # and the research note is gone too
-echo "  [agent] reset --hard done; git status is clean, the work looks gone"
+echo "  [agent] reset --hard done — my uncommitted fix is gone, and so is the note"
 '
 
 ( cd "$repo" && \
@@ -110,14 +110,23 @@ WT="$(cat "$wtfile")"
 [ -d "$WT" ] || fail "could not locate the session worktree"
 
 # ── the damage, in plain git ──────────────────────────────────────────────
-say "In plain git, the work is simply gone — there is no undo:"
-run "git -C <worktree> status --porcelain   →  (clean)"
+say "In plain git, your work is simply gone — there is nothing to restore from:"
 solver_now="$(cat "$WT/solver.py")"
 case "$solver_now" in
   *"return 42"*) fail "reset --hard should have erased the fix, but it's still here" ;;
   *) ok "solver.py is back to the committed stub — the fix is gone" ;;
 esac
 if [ ! -f "$WT/NOTES.md" ]; then ok "NOTES.md (untracked) is gone too"; else fail "NOTES.md unexpectedly survived"; fi
+# Be honest about what `git status` really shows in a session worktree: the
+# ONLY untracked entry is the session's own `.agend-managed` marker — no trace
+# of the erased work. No diff, no stash, no reflog for uncommitted changes.
+real_changes="$("$REAL_GIT" -C "$WT" status --porcelain | grep -v '^?? \.agend-managed$' || true)"
+run "git status --porcelain   →  ?? .agend-managed   (only the session marker — none of your work)"
+if [ -z "$real_changes" ]; then
+  ok "plain git has no record of the erased work to recover from"
+else
+  fail "unexpected residual changes after reset: $real_changes"
+fi
 
 # ── recovery: ONE command, no ref, no git internals ───────────────────────
 say "Recover with one command — no snapshot ref, no git knowledge:"

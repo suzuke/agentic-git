@@ -11,6 +11,9 @@ invisible until the moment it matters:
 - **routes** every mutating command into the worktree the agent is *bound* to,
 - **denies** the operations that wreck multi-agent setups (with an actionable,
   LLM-readable explanation of what to do instead),
+- **recovers** — snapshots the worktree before any destructive op, so *one*
+  command (`agentic-git snapshots restore`) puts back what a `reset --hard`
+  or `clean -fd` just erased. Plain git has no undo for that,
 - **attributes** every commit to the agent that made it, and
 - lets the operator **bypass** any of it, deliberately and audited.
 
@@ -32,6 +35,7 @@ Coding agents make mistakes at machine speed, and stock git amplifies them:
 
 | Agent habit | Blast radius without a guard |
 |---|---|
+| `git reset --hard` / `clean -fd` with uncommitted work | the work is gone — plain git keeps no copy to restore from |
 | `git checkout main` / `git switch <other-branch>` | tramples the branch another agent (or you) is working on |
 | `git worktree add/remove` on its own | corrupts the worktree layout your orchestrator manages |
 | running git *in your canonical checkout* | detaches or moves **your** HEAD (this really happened; it is why this tool exists) |
@@ -82,33 +86,60 @@ classify(argv, cwd, binding)          binding = HMAC-signed
   out-vote the binding), Unix `exec()` process replacement, Windows
   `status()`+exit.
 
-## Trying it
+## Quickstart
+
+Install, then launch your agent inside a guarded session. **One command**
+provisions a worktree, a signed binding, and the hooks — the agent just runs
+the `git` it already knows:
 
 ```sh
-cargo build --release
+cargo install agentic-git          # or: cargo build --release
 
-# Simulate what an orchestrator does:
+# Launch ANY agent command in a guarded session on its own branch:
+agentic-git run --agent my-agent --branch my-agent/work -- \
+    claude --dangerously-skip-permissions     # …or codex, or a shell, or make
+```
+
+Inside the session the agent's `git` is the shim:
+
+```
+git status          → passthrough
+git checkout main   → denied, with the reason and the way out
+git reset --hard    → runs, but the worktree is snapshotted first
+```
+
+If the agent erases uncommitted work, put it back with **one command** — no
+snapshot ref, no git internals (the session prints its worktree path on exit):
+
+```sh
+agentic-git snapshots restore --repo <the session's worktree>
+```
+
+See the whole thing end-to-end — an agent wipes real work, one command brings
+it back — in **[`demo/recovery-demo.sh`](demo/recovery-demo.sh)**. It asserts
+every step, so it also doubles as a cold-start acceptance check on your machine.
+
+### Embedding it in your own orchestrator
+
+Already running a fleet and want the shim *without* `run`'s provisioning? Put
+the binary on the agent's `PATH` as `git` and write the binding yourself:
+
+```sh
 export AGENTIC_GIT_HOME=$HOME/.agentic-git
 mkdir -p "$AGENTIC_GIT_HOME/bin"
-ln -sf "$PWD/target/release/agentic-git" "$AGENTIC_GIT_HOME/bin/git"
+ln -sf "$(command -v agentic-git)" "$AGENTIC_GIT_HOME/bin/git"
 
 # In the agent's environment (NOT your own shell):
-export AGENTIC_GIT_REAL_GIT="$(command -v git)"   # optional — resolve BEFORE touching PATH
+export AGENTIC_GIT_REAL_GIT="$(command -v git)"   # resolve BEFORE touching PATH
 export PATH="$AGENTIC_GIT_HOME/bin:$PATH"
 export AGENTIC_GIT_AGENT=my-agent
 # (Order matters: `command -v git` after the PATH prepend would capture the
 # shim itself. The shim detects and ignores a self-referential REAL_GIT and
 # falls back to a self-excluding PATH search, but don't rely on it.)
-
-git status          # → passthrough
-git checkout main   # → denied, with the reason and the way out
 ```
 
-Today the *binding* half (leases, worktree provisioning, GC) is the
-orchestrator's job — agend-terminal plays that role in the original fleet. A
-built-in `agentic-git run --branch <b> -- <agent-cmd>` session mode that
-absorbs the minimal provisioning role for standalone use is the top roadmap
-item.
+agend-terminal plays this orchestrator role in the original fleet; the
+`agentic-git-core` crate is the contract surface for doing the same in yours.
 
 ## Environment contract
 

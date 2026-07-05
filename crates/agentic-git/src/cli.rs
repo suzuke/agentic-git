@@ -542,6 +542,55 @@ fn git_bypass_cmd(git: &str) -> Command {
     cmd
 }
 
+/// A filename-safe, cross-process-stable key for a source repo (FNV-1a over the
+/// path bytes — deterministic across processes/Rust versions, unlike
+/// `DefaultHasher`, so two racing `run`s pick the SAME lock file).
+fn provision_lock_key(source_repo: &Path) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in source_repo.as_os_str().as_encoded_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// Acquire the per-source-repo provisioning lock, returning a guard held until
+/// dropped. The whole provisioning critical section — `git worktree add` AND the
+/// `git config --worktree` hooks wiring — is NOT concurrency-safe: each reads the
+/// shared worktree list and can fatal on a sibling's half-written admin metadata
+/// (`failed to read .git/worktrees/<other>/commondir`). An advisory `flock`,
+/// keyed by the source repo and kept under the home (never inside `.git`), makes
+/// two racing `run`s take turns; it auto-releases when the fd closes (process
+/// exit included), so a crashed holder never wedges it. Best-effort: any setup
+/// failure returns `None` and provisioning proceeds unserialized (the
+/// pre-existing behavior) rather than blocking a session start. MUST be dropped
+/// before the agent spawns, or the whole SESSION would serialize.
+#[cfg(unix)]
+fn acquire_provision_lock(home: &Path, source_repo: &Path) -> Option<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let dir = home.join("locks");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("wt-{}.lock", provision_lock_key(source_repo)));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .ok()?;
+    // Blocking exclusive advisory lock; released when the returned File drops.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return None;
+    }
+    Some(file)
+}
+
+#[cfg(not(unix))]
+fn acquire_provision_lock(_home: &Path, _source_repo: &Path) -> Option<std::fs::File> {
+    // v1: no cross-process advisory lock on Windows (already an unverified
+    // platform); provisioning there proceeds unserialized.
+    None
+}
+
 fn resolve_source_repo(git: &str) -> Result<PathBuf, String> {
     let out = git_bypass_cmd(git)
         .args(["rev-parse", "--show-toplevel"])
@@ -917,6 +966,13 @@ fn run_cmd(raw_args: &[String]) -> ! {
 
     let issued_at = chrono::Utc::now().to_rfc3339();
 
+    // Serialize the whole worktree-metadata-touching critical section — the
+    // `worktree add` (fresh) AND the `git config --worktree` hooks wiring
+    // (Step 6, fresh or reused) — per source repo. Both read the shared worktree
+    // list and race a sibling mid-provision (git reports `failed to read
+    // .git/worktrees/<other>/commondir`). Held until dropped just before spawn.
+    let provision_lock = acquire_provision_lock(&home, &source_repo);
+
     if !reused {
         if let Some(parent) = wt_path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -929,9 +985,8 @@ fn run_cmd(raw_args: &[String]) -> ! {
         match wt_out {
             Ok(out) if out.status.success() => {}
             Ok(out) => {
-                // Surface git's own refusal verbatim (e.g. a second `run` on
-                // the same branch — natural mutual exclusion, no lease
-                // machinery in v1).
+                // Surface git's own refusal verbatim (e.g. a second `run` on the
+                // same branch — natural mutual exclusion, no lease machinery).
                 eprint!("{}", String::from_utf8_lossy(&out.stderr));
                 std::process::exit(out.status.code().unwrap_or(1));
             }
@@ -994,6 +1049,11 @@ fn run_cmd(raw_args: &[String]) -> ! {
         eprintln!("agentic-git: run: {e}");
         std::process::exit(1);
     }
+
+    // Provisioning is done — release the lock BEFORE the (long-lived) agent
+    // spawns, so concurrent sessions serialize only their provisioning, not
+    // their whole run.
+    drop(provision_lock);
 
     // Step 7: shim wiring.
     if let Err(e) = ensure_shim_symlink(&home) {

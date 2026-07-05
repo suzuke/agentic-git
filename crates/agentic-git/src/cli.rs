@@ -53,6 +53,7 @@ fn print_usage(bad: Option<&str>) {
         "Usage:\n  \
          agentic-git run [--agent <name>] [--branch <branch>] [--base <ref>] -- <cmd...>\n  \
          agentic-git snapshots list [--repo <path>]\n  \
+         agentic-git snapshots restore [<snapshot-ref>] [--repo <path>] [--yes] [--staged]\n  \
          agentic-git snapshots prune [--older-than <N>d] [--repo <path>]\n  \
          agentic-git version\n\n\
          To use the shim, invoke via <home>/bin/git (see README)."
@@ -65,8 +66,12 @@ fn print_snapshots_usage() {
     eprintln!(
         "Usage:\n  \
          agentic-git snapshots list [--repo <path>]\n  \
+         agentic-git snapshots restore [<snapshot-ref>] [--repo <path>] [--yes] [--staged]\n  \
          agentic-git snapshots prune [--older-than <N>d] [--repo <path>]\n\n\
-         Restore is manual in v1: git checkout <snapshot-ref> -- ."
+         restore with no ref uses the only snapshot (or --yes for the newest of\n  \
+         several); it writes the snapshot's files back to the working tree\n  \
+         without deleting anything created since, and saves your current state\n  \
+         first so the restore is itself undoable."
     );
 }
 
@@ -74,6 +79,7 @@ fn snapshots_cmd(args: &[String]) -> ! {
     match args.first().map(String::as_str) {
         Some("list") => snapshots_list_cmd(&args[1..]),
         Some("prune") => snapshots_prune_cmd(&args[1..]),
+        Some("restore") => snapshots_restore_cmd(&args[1..]),
         Some(other) => {
             eprintln!("agentic-git: snapshots: unknown subcommand `{other}`");
             print_snapshots_usage();
@@ -194,6 +200,135 @@ fn snapshots_prune_cmd(args: &[String]) -> ! {
         Err(e) => {
             eprintln!("agentic-git: snapshots prune: {e}");
             std::process::exit(1);
+        }
+    }
+}
+
+/// `[<ref>] [--repo <path>] [--yes] [--staged]` — at most one positional
+/// (the snapshot ref). Hand-rolled to match the sibling commands' discipline.
+fn parse_restore_args(args: &[String]) -> Result<(PathBuf, Option<String>, bool, bool), String> {
+    let mut repo: Option<PathBuf> = None;
+    let mut target: Option<String> = None;
+    let mut assume_yes = false;
+    let mut staged = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--repo" => {
+                i += 1;
+                let v = args.get(i).ok_or("`--repo` requires a value")?;
+                repo = Some(PathBuf::from(v));
+            }
+            "--yes" | "-y" => assume_yes = true,
+            "--staged" => staged = true,
+            flag if flag.starts_with('-') && flag != "-" => {
+                return Err(format!("unknown flag `{flag}` for `snapshots restore`"));
+            }
+            other => {
+                if target.is_some() {
+                    return Err(format!(
+                        "unexpected extra argument `{other}` (at most one snapshot ref)"
+                    ));
+                }
+                target = Some(other.to_string());
+            }
+        }
+        i += 1;
+    }
+    Ok((repo.unwrap_or_else(|| PathBuf::from(".")), target, assume_yes, staged))
+}
+
+fn snapshots_restore_cmd(args: &[String]) -> ! {
+    let (repo, target, assume_yes, staged) = match parse_restore_args(args) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("agentic-git: snapshots restore: {e}");
+            print_snapshots_usage();
+            std::process::exit(2);
+        }
+    };
+    let git = super::resolve_real_git();
+    let opts = super::snapshot::RestoreOpts {
+        target_ref: target.as_deref(),
+        assume_yes,
+        staged,
+        agent: "",
+    };
+    match super::snapshot::restore_snapshot(&git, &repo, &opts) {
+        Ok(o) => {
+            print_restore_outcome(&o);
+            std::process::exit(0);
+        }
+        Err(e) => std::process::exit(print_restore_error(&e)),
+    }
+}
+
+fn print_restore_outcome(o: &super::snapshot::RestoreOutcome) {
+    if o.already_current {
+        println!(
+            "Working tree already matches {} \u{2014} nothing to restore.",
+            o.restored_from
+        );
+        return;
+    }
+    let staging = if o.staged {
+        "left staged in the index"
+    } else {
+        "left unstaged (working tree only)"
+    };
+    println!("Restored {} path(s) from {}", o.paths_written, o.restored_from);
+    if !o.when.is_empty() {
+        println!("  snapshot taken {} (before a `{}` operation)", o.when, o.op);
+    }
+    println!("  files created after the snapshot were left untouched; changes {staging}");
+    if let Some(pre) = &o.pre_restore_ref {
+        println!("  \u{21a9} your pre-restore state was saved \u{2014} undo with:");
+        println!("      agentic-git snapshots restore {pre}");
+    }
+}
+
+/// Map a restore failure to its user message + process exit code. Arg/usage
+/// problems exit 2 (mirrors the parse layer); operational failures exit 1.
+fn print_restore_error(e: &super::snapshot::RestoreError) -> i32 {
+    use super::snapshot::RestoreError::*;
+    match e {
+        NoSnapshots => {
+            eprintln!("agentic-git: snapshots restore: no snapshots to restore from");
+            1
+        }
+        NotOurRef(r) => {
+            eprintln!(
+                "agentic-git: snapshots restore: `{r}` is not an agentic-git snapshot ref \
+                 (must start with refs/agentic-git/snapshots/); see `snapshots list`"
+            );
+            2
+        }
+        NoSuchSnapshot(r) => {
+            eprintln!("agentic-git: snapshots restore: no such snapshot `{r}`");
+            1
+        }
+        Ambiguous(rows) => {
+            eprintln!(
+                "agentic-git: snapshots restore: {} snapshots exist \u{2014} refusing to guess.",
+                rows.len()
+            );
+            eprintln!("Pass an explicit ref (newest first):");
+            for r in rows.iter().take(3) {
+                eprintln!("  {}   ({}, before `{}`)", r.refname, r.when, r.op);
+            }
+            eprintln!("\u{2026}or re-run with --yes to restore the newest.");
+            2
+        }
+        PreRestoreFailed(msg) => {
+            eprintln!(
+                "agentic-git: snapshots restore: could not save current state before restoring \
+                 ({msg}); aborted to avoid overwriting unsaved work. Commit or stash, then retry."
+            );
+            1
+        }
+        Git(msg) => {
+            eprintln!("agentic-git: snapshots restore: {msg}");
+            1
         }
     }
 }

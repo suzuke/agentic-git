@@ -407,6 +407,21 @@ fn parse_snapshot_ref(refname: &str) -> Option<(String, String)> {
     Some((who.to_string(), op.to_string()))
 }
 
+/// The `<seq>` field of a snapshot ref (the monotonic same-second
+/// disambiguator), or 0 if the name isn't one of ours / is malformed. Used
+/// only as a tiebreak when ordering by the second-granular committer date.
+fn snapshot_seq(refname: &str) -> u64 {
+    let Some(rest) = refname.strip_prefix(SNAPSHOT_REF_PREFIX) else {
+        return 0;
+    };
+    let Some((_who, tail)) = rest.split_once('/') else {
+        return 0;
+    };
+    let mut parts = tail.splitn(3, '-');
+    let _ts = parts.next();
+    parts.next().and_then(|s| s.parse().ok()).unwrap_or(0)
+}
+
 // ── Prune (lazy, no daemon) ──────────────────────────────────────────────
 
 /// Delete snapshot refs under `refs/agentic-git/` older than `ttl_secs`
@@ -514,6 +529,224 @@ pub(crate) fn list_snapshots(git: &str, dir: &Path) -> Result<Vec<SnapshotRow>, 
         });
     }
     Ok(rows)
+}
+
+// ── Restore (one-command recovery — issue #4 P2 follow-up) ───────────────
+
+/// Options for [`restore_snapshot`]. Hand-built (no clap) — mirrors the rest
+/// of this crate's dependency discipline.
+pub(crate) struct RestoreOpts<'a> {
+    /// Explicit snapshot ref, or `None` to auto-resolve (the only one / the
+    /// newest with `--yes`).
+    pub(crate) target_ref: Option<&'a str>,
+    /// Proceed with the newest when several snapshots exist (else the caller
+    /// gets [`RestoreError::Ambiguous`] and must choose — we never guess).
+    pub(crate) assume_yes: bool,
+    /// Leave the restored paths staged (the classic `checkout <tree> -- .`
+    /// side effect). Default false — a user recovering lost files does not
+    /// expect them silently staged into the next commit.
+    pub(crate) staged: bool,
+    /// Agent name for the pre-restore safety snapshot's `who` slot.
+    pub(crate) agent: &'a str,
+}
+
+pub(crate) struct RestoreOutcome {
+    pub(crate) restored_from: String,
+    pub(crate) when: String,
+    pub(crate) op: String,
+    /// The safety snapshot of the pre-restore state (undo target), taken only
+    /// when the tree had uncommitted work to lose. `None` when it was clean.
+    pub(crate) pre_restore_ref: Option<String>,
+    pub(crate) paths_written: usize,
+    pub(crate) staged: bool,
+    /// The working tree already matched the snapshot — nothing was written.
+    pub(crate) already_current: bool,
+}
+
+pub(crate) enum RestoreError {
+    /// No snapshot refs exist at all.
+    NoSnapshots,
+    /// The ref is not under `refs/agentic-git/snapshots/` — restore only ever
+    /// reads from our own snapshots, never an arbitrary branch/tag.
+    NotOurRef(String),
+    /// A well-formed snapshot ref that doesn't resolve.
+    NoSuchSnapshot(String),
+    /// Several snapshots and no explicit ref / `--yes`: refuse to guess.
+    /// Carries the candidates (newest first) for the caller to display.
+    Ambiguous(Vec<SnapshotRow>),
+    /// The pre-restore safety snapshot failed — fail CLOSED. Unlike
+    /// `maybe_snapshot` (which fails open so it never blocks the git op it is
+    /// protecting), restore is OUR OWN command: there is no reason to overwrite
+    /// unsaved work once the safety net is known to be down.
+    PreRestoreFailed(String),
+    /// A git plumbing step failed.
+    Git(String),
+}
+
+/// Restore the working tree from a snapshot — the one-command form of the
+/// documented `git checkout <snapshot-ref> -- .`. **Non-destructive**: writes
+/// the snapshot's paths back, but never deletes files created after it. Takes
+/// a pre-restore safety snapshot first (so the restore itself is undoable).
+pub(crate) fn restore_snapshot(
+    git: &str,
+    dir: &Path,
+    opts: &RestoreOpts,
+) -> Result<RestoreOutcome, RestoreError> {
+    let refname = resolve_restore_target(git, dir, opts)?;
+    let (_who, op) = parse_snapshot_ref(&refname).unwrap_or_default();
+    let when = ref_committerdate(git, dir, &refname);
+
+    let changed = restore_changed_paths(git, dir, &refname).map_err(RestoreError::Git)?;
+    if changed.is_empty() {
+        return Ok(RestoreOutcome {
+            restored_from: refname,
+            when,
+            op,
+            pre_restore_ref: None,
+            paths_written: 0,
+            staged: opts.staged,
+            already_current: true,
+        });
+    }
+
+    // Safety net FIRST, fail-closed: restore overwrites the working tree, so
+    // capture whatever uncommitted state exists before touching it. Skip only
+    // when there is genuinely nothing uncommitted to lose.
+    let pre_restore_ref = if is_clean(git, dir) {
+        None
+    } else {
+        Some(create_snapshot(git, dir, opts.agent, "restore").map_err(RestoreError::PreRestoreFailed)?)
+    };
+
+    checkout_paths(git, dir, &refname, &changed).map_err(RestoreError::Git)?;
+    if !opts.staged {
+        // Best-effort: the files ARE recovered; a failure to unstage is a
+        // cosmetic index nuisance, not a reason to fail a successful recovery.
+        if let Err(e) = unstage_paths(git, dir, &changed) {
+            eprintln!(
+                "agentic-git: warning \u{2014} restored files are staged; could not unstage ({e})"
+            );
+        }
+    }
+
+    Ok(RestoreOutcome {
+        restored_from: refname,
+        when,
+        op,
+        pre_restore_ref,
+        paths_written: changed.len(),
+        staged: opts.staged,
+        already_current: false,
+    })
+}
+
+fn resolve_restore_target(git: &str, dir: &Path, opts: &RestoreOpts) -> Result<String, RestoreError> {
+    if let Some(r) = opts.target_ref {
+        if !r.starts_with(SNAPSHOT_REF_PREFIX) {
+            return Err(RestoreError::NotOurRef(r.to_string()));
+        }
+        if !ref_exists(git, dir, r) {
+            return Err(RestoreError::NoSuchSnapshot(r.to_string()));
+        }
+        return Ok(r.to_string());
+    }
+    let mut rows = list_snapshots(git, dir).map_err(RestoreError::Git)?;
+    // `iso-strict` timestamps sort lexicographically == chronologically, but
+    // are only second-granular AND every snapshot's date is forced to `now`
+    // (Δd) — so two ops in the same second tie. Break the tie by the ref's own
+    // `<seq>` (monotonic within a `<who>/<ts>` bucket), so "newest" is the
+    // genuinely-last snapshot, not whichever `for-each-ref` happened to list
+    // last. (Cross-`who` same-second ties are truly concurrent — best-effort.)
+    rows.sort_by(|a, b| {
+        b.when
+            .cmp(&a.when)
+            .then_with(|| snapshot_seq(&b.refname).cmp(&snapshot_seq(&a.refname)))
+    });
+    match rows.len() {
+        0 => Err(RestoreError::NoSnapshots),
+        1 => Ok(rows.remove(0).refname),
+        _ if opts.assume_yes => Ok(rows.remove(0).refname),
+        _ => Err(RestoreError::Ambiguous(rows)),
+    }
+}
+
+fn ref_committerdate(git: &str, dir: &Path, refname: &str) -> String {
+    git_bypass(git)
+        .arg("-C")
+        .arg(dir)
+        .args(["for-each-ref", "--format=%(committerdate:iso-strict)", refname])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Paths the restore will write: everything in the snapshot that differs from
+/// the current working tree, EXCLUDING paths added since the snapshot (`A` —
+/// newer files we must never delete). Because the snapshot committed untracked
+/// files into its tree (`add -A`), a file lost from the working tree shows up
+/// here as `D` and is recovered. `-z` keeps paths with spaces/newlines intact.
+fn restore_changed_paths(git: &str, dir: &Path, refname: &str) -> Result<Vec<String>, String> {
+    let out = git_bypass(git)
+        .arg("-C")
+        .arg(dir)
+        .args(["diff", "--name-status", "--no-renames", "-z", refname, "--", "."])
+        .output()
+        .map_err(|e| format!("spawn `diff`: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "`diff` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    // `-z --name-status --no-renames` emits `<status>\0<path>\0` per entry.
+    let mut tokens = out.stdout.split(|&b| b == 0).filter(|t| !t.is_empty());
+    let mut paths = Vec::new();
+    while let (Some(status), Some(path)) = (tokens.next(), tokens.next()) {
+        if status.first() == Some(&b'A') {
+            continue;
+        }
+        paths.push(String::from_utf8_lossy(path).into_owned());
+    }
+    Ok(paths)
+}
+
+fn checkout_paths(git: &str, dir: &Path, refname: &str, paths: &[String]) -> Result<(), String> {
+    let out = git_bypass(git)
+        .arg("-C")
+        .arg(dir)
+        .args(["checkout", refname, "--"])
+        .args(paths)
+        .output()
+        .map_err(|e| format!("spawn `checkout`: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "`checkout` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Undo `checkout`'s index side effect for exactly the restored paths, so the
+/// recovery lands in the working tree UNSTAGED. Scoped to the restored paths
+/// (not `reset -- .`) so any unrelated pre-existing staged content survives.
+fn unstage_paths(git: &str, dir: &Path, paths: &[String]) -> Result<(), String> {
+    let out = git_bypass(git)
+        .arg("-C")
+        .arg(dir)
+        .args(["reset", "-q", "--"])
+        .args(paths)
+        .output()
+        .map_err(|e| format!("spawn `reset`: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "`reset` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 // ── Push guard (Δa v5) ──────────────────────────────────────────────────

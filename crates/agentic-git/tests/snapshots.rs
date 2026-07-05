@@ -1004,3 +1004,205 @@ fn checkout_pathspec_from_file_is_recoverable_review2() {
     );
     cleanup(&root);
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// `snapshots restore` — the one-command recovery CLI (issue #4 P2 follow-up)
+// Drives the SHIPPED binary via CLI dispatch (argv[0] = binary name, NOT the
+// shim's forced "git"). Snapshots are created through the real shim path
+// (`run_shim` + a destructive op), so these are end-to-end.
+// ════════════════════════════════════════════════════════════════════════
+
+/// Invoke the CLI surface (NOT the shim) — `snapshots restore` etc. Strips
+/// ambient bypass/real-git twins like `run_shim`, but resolves the real git
+/// via `AGENTIC_GIT_REAL_GIT` so restore's own plumbing never re-enters a shim.
+fn run_cli(cwd: &Path, real_git: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_agentic-git"))
+        .args(args)
+        .current_dir(cwd)
+        .env("AGENTIC_GIT_REAL_GIT", real_git)
+        .env("PATH", sanitized_path(real_git))
+        .env_remove("AGEND_REAL_GIT")
+        .env_remove("AGENTIC_GIT_BYPASS")
+        .env_remove("AGEND_GIT_BYPASS")
+        .output()
+        .expect("run cli")
+}
+
+/// One dirty tracked change + reset --hard → exactly one snapshot. Returns the
+/// worktree so the caller can drive `snapshots restore` in it.
+fn dirty_reset_snapshot(root: &Path, real_git: &Path, repo: &Path, agent: &str, branch: &str, home: &Path, readme: &str) -> PathBuf {
+    let wt = worktree_of(root, real_git, repo, branch);
+    write_binding(home, agent, branch, &wt);
+    std::fs::write(wt.join("README.md"), readme).unwrap();
+    let out = run_shim(repo, home, agent, real_git, &[("AGENTIC_GIT_SNAPSHOTS", "1")], &["reset", "--hard"]);
+    assert!(out.status.success(), "seed reset --hard: {}", String::from_utf8_lossy(&out.stderr));
+    wt
+}
+
+// ── R1. core: recovers tracked + untracked, lands UNSTAGED, no new ref ───
+#[test]
+fn restore_cli_recovers_tracked_and_untracked_unstaged() {
+    let root = tempdir("restore-core");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let real_git = resolve_setup_real_git();
+    init_repo(&real_git, &repo);
+    let wt = worktree_of(&root, &real_git, &repo, "agent/rcore");
+    let home = root.join("home");
+    write_binding(&home, "agent-rc", "agent/rcore", &wt);
+
+    std::fs::write(wt.join("README.md"), "TRACKED CHANGE\n").unwrap();
+    std::fs::write(wt.join("untracked.txt"), "UNTRACKED CONTENT\n").unwrap();
+    let out = run_shim(&repo, &home, "agent-rc", &real_git, &[("AGENTIC_GIT_SNAPSHOTS", "1")], &["reset", "--hard"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(snapshot_refs(&real_git, &repo).len(), 1);
+
+    // Both look lost: reset reverted the tracked file; drop the untracked one.
+    assert_eq!(std::fs::read_to_string(wt.join("README.md")).unwrap(), "hello\n");
+    std::fs::remove_file(wt.join("untracked.txt")).unwrap();
+
+    // ONE command, no ref (exactly one snapshot), no bypass.
+    let r = run_cli(&wt, &real_git, &["snapshots", "restore"]);
+    assert!(r.status.success(), "restore failed: {}", String::from_utf8_lossy(&r.stderr));
+
+    assert_eq!(std::fs::read_to_string(wt.join("README.md")).unwrap(), "TRACKED CHANGE\n");
+    assert_eq!(std::fs::read_to_string(wt.join("untracked.txt")).unwrap(), "UNTRACKED CONTENT\n");
+    // Tree was clean at restore time → no pre-restore snapshot.
+    assert_eq!(snapshot_refs(&real_git, &repo).len(), 1, "clean tree → no new ref");
+
+    // Recovery is UNSTAGED — nothing in the index.
+    let status = setup_git(&real_git, &["status", "--porcelain"], &wt);
+    let s = String::from_utf8_lossy(&status.stdout);
+    assert!(s.contains(" M README.md"), "README unstaged-modified: {s:?}");
+    assert!(s.contains("?? untracked.txt"), "recovered untracked stays untracked: {s:?}");
+    for line in s.lines() {
+        assert!(
+            !matches!(line.as_bytes().first(), Some(b'M' | b'A' | b'D' | b'R' | b'C')),
+            "no path may be staged: {line:?}"
+        );
+    }
+    cleanup(&root);
+}
+
+// ── R2. `--staged` opts back into the classic staged restore ─────────────
+#[test]
+fn restore_cli_staged_flag_leaves_index_staged() {
+    let root = tempdir("restore-staged");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let real_git = resolve_setup_real_git();
+    init_repo(&real_git, &repo);
+    let home = root.join("home");
+    let wt = dirty_reset_snapshot(&root, &real_git, &repo, "agent-rs", "agent/rstaged", &home, "STAGED WANTED\n");
+
+    let r = run_cli(&wt, &real_git, &["snapshots", "restore", "--staged"]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    assert_eq!(std::fs::read_to_string(wt.join("README.md")).unwrap(), "STAGED WANTED\n");
+
+    let status = setup_git(&real_git, &["status", "--porcelain"], &wt);
+    let s = String::from_utf8_lossy(&status.stdout);
+    assert!(s.contains("M  README.md"), "--staged must leave README staged: {s:?}");
+    cleanup(&root);
+}
+
+// ── R3. several snapshots + no ref/--yes → refuse; --yes → newest ────────
+#[test]
+fn restore_cli_refuses_to_guess_then_yes_takes_newest() {
+    let root = tempdir("restore-ambig");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let real_git = resolve_setup_real_git();
+    init_repo(&real_git, &repo);
+    let wt = worktree_of(&root, &real_git, &repo, "agent/rambig");
+    let home = root.join("home");
+    write_binding(&home, "agent-ra", "agent/rambig", &wt);
+
+    // Two snapshots: V1 then V2 (V2 newest).
+    for v in ["V1\n", "V2\n"] {
+        std::fs::write(wt.join("README.md"), v).unwrap();
+        let out = run_shim(&repo, &home, "agent-ra", &real_git, &[("AGENTIC_GIT_SNAPSHOTS", "1")], &["reset", "--hard"]);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    assert_eq!(snapshot_refs(&real_git, &repo).len(), 2);
+
+    // No ref, no --yes → refuse to guess (exit 2).
+    let refuse = run_cli(&wt, &real_git, &["snapshots", "restore"]);
+    assert_eq!(refuse.status.code(), Some(2), "must refuse: {}", String::from_utf8_lossy(&refuse.stderr));
+    assert!(String::from_utf8_lossy(&refuse.stderr).contains("refusing to guess"));
+
+    // --yes → the NEWEST (V2), regardless of same-second ordering.
+    let yes = run_cli(&wt, &real_git, &["snapshots", "restore", "--yes"]);
+    assert!(yes.status.success(), "{}", String::from_utf8_lossy(&yes.stderr));
+    assert_eq!(std::fs::read_to_string(wt.join("README.md")).unwrap(), "V2\n");
+    cleanup(&root);
+}
+
+// ── R4. a non-snapshot ref is refused (never restores a branch/tag) ──────
+#[test]
+fn restore_cli_rejects_non_snapshot_ref() {
+    let root = tempdir("restore-badref");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let real_git = resolve_setup_real_git();
+    init_repo(&real_git, &repo);
+
+    let r = run_cli(&repo, &real_git, &["snapshots", "restore", "refs/heads/main"]);
+    assert_eq!(r.status.code(), Some(2), "bad ref must exit 2: {}", String::from_utf8_lossy(&r.stderr));
+    assert!(String::from_utf8_lossy(&r.stderr).contains("not an agentic-git snapshot ref"));
+    cleanup(&root);
+}
+
+// ── R5. no snapshots at all → clean exit 1, actionable message ───────────
+#[test]
+fn restore_cli_no_snapshots_exit_1() {
+    let root = tempdir("restore-none");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let real_git = resolve_setup_real_git();
+    init_repo(&real_git, &repo);
+
+    let r = run_cli(&repo, &real_git, &["snapshots", "restore"]);
+    assert_eq!(r.status.code(), Some(1), "no snapshots → exit 1: {}", String::from_utf8_lossy(&r.stderr));
+    assert!(String::from_utf8_lossy(&r.stderr).contains("no snapshots to restore from"));
+    cleanup(&root);
+}
+
+// ── R6. non-destructive + undo round-trip via the pre-restore snapshot ───
+#[test]
+fn restore_cli_is_nondestructive_and_undoable() {
+    let root = tempdir("restore-undo");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let real_git = resolve_setup_real_git();
+    init_repo(&real_git, &repo);
+    let wt = worktree_of(&root, &real_git, &repo, "agent/rundo");
+    let home = root.join("home");
+    write_binding(&home, "agent-ru", "agent/rundo", &wt);
+
+    // Snapshot S1 captures README="OLD WORK" before reset reverts it.
+    std::fs::write(wt.join("README.md"), "OLD WORK\n").unwrap();
+    let out = run_shim(&repo, &home, "agent-ru", &real_git, &[("AGENTIC_GIT_SNAPSHOTS", "1")], &["reset", "--hard"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let s1: Vec<String> = snapshot_refs(&real_git, &repo);
+    assert_eq!(s1.len(), 1);
+
+    // Fresh, DIFFERENT current work (dirty tree at restore time).
+    std::fs::write(wt.join("README.md"), "CURRENT\n").unwrap();
+    std::fs::write(wt.join("newfile.txt"), "NEW CURRENT\n").unwrap();
+
+    // Restore S1 (only snapshot). Dirty tree → a pre-restore snapshot is taken.
+    let r = run_cli(&wt, &real_git, &["snapshots", "restore"]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    // Tracked recovered to S1; the file created AFTER S1 is left untouched.
+    assert_eq!(std::fs::read_to_string(wt.join("README.md")).unwrap(), "OLD WORK\n");
+    assert_eq!(std::fs::read_to_string(wt.join("newfile.txt")).unwrap(), "NEW CURRENT\n", "non-destructive: newer file survives");
+    let after: Vec<String> = snapshot_refs(&real_git, &repo);
+    assert_eq!(after.len(), 2, "dirty tree → one pre-restore snapshot added: {after:?}");
+
+    // Undo: restore the pre-restore snapshot (the one that isn't S1).
+    let undo_ref = after.iter().find(|r| !s1.contains(r)).expect("pre-restore ref").clone();
+    let u = run_cli(&wt, &real_git, &["snapshots", "restore", &undo_ref]);
+    assert!(u.status.success(), "undo: {}", String::from_utf8_lossy(&u.stderr));
+    assert_eq!(std::fs::read_to_string(wt.join("README.md")).unwrap(), "CURRENT\n", "undo brings current work back");
+    cleanup(&root);
+}

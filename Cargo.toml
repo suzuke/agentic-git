@@ -3,6 +3,9 @@ resolver = "2"
 members = ["crates/agentic-git-core", "crates/agentic-git"]
 
 [workspace.package]
+# agentic-git-core is the stable contract crate — it stays on its own version
+# and only bumps when its API changes. The shim (crates/agentic-git) sets its
+# own `version` explicitly, so the two can move independently.
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"

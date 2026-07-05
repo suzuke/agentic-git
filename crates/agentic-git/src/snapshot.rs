@@ -736,6 +736,12 @@ fn run_pathspec_stdin(cmd: &mut Command, pathspec_nul: &[u8], label: &str) -> Re
     use std::io::Write;
     use std::process::Stdio;
     let mut child = cmd
+        // Treat every fed pathspec as a LITERAL path, never magic. A perfectly
+        // legal filename that begins with git's pathspec-magic sigil — e.g.
+        // `:(glob)literal.txt` or `:/foo` — would otherwise be parsed as a
+        // pathspec expression and fail to match, so restore could not recover a
+        // file it had faithfully snapshotted. (fugu PR #10 review, repro'd.)
+        .env("GIT_LITERAL_PATHSPECS", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

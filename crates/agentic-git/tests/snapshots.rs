@@ -1244,3 +1244,39 @@ fn restore_cli_handles_many_long_paths_without_argv_limit() {
     assert_eq!(restored, n, "every file in the large snapshot must be recovered");
     cleanup(&root);
 }
+
+// ── R8. a filename that LOOKS like pathspec magic is recovered literally ──
+// `:(glob)literal.txt` is a perfectly legal filename; without literal
+// pathspecs git parses it as a magic expression and restore cannot recover
+// the file it snapshotted (fugu PR #10 re-review). This file is unix-only
+// (see the `std::os::unix` import), so the `:` name is always valid here.
+#[test]
+fn restore_cli_recovers_pathspec_magic_filename() {
+    let root = tempdir("restore-magic");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let real_git = resolve_setup_real_git();
+    init_repo(&real_git, &repo);
+    let wt = worktree_of(&root, &real_git, &repo, "agent/rmagic");
+    let home = root.join("home");
+    write_binding(&home, "agent-rm", "agent/rmagic", &wt);
+
+    let magic = ":(glob)literal.txt";
+    std::fs::write(wt.join("README.md"), "trigger\n").unwrap(); // dirty → snapshot
+    std::fs::write(wt.join(magic), "MAGIC CONTENT\n").unwrap();
+    let out = run_shim(&repo, &home, "agent-rm", &real_git, &[("AGENTIC_GIT_SNAPSHOTS", "1")], &["reset", "--hard"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(snapshot_refs(&real_git, &repo).len(), 1);
+
+    std::fs::remove_file(wt.join(magic)).unwrap();
+    assert!(!wt.join(magic).exists());
+
+    let r = run_cli(&wt, &real_git, &["snapshots", "restore"]);
+    assert!(r.status.success(), "magic-name restore failed: {}", String::from_utf8_lossy(&r.stderr));
+    assert_eq!(
+        std::fs::read_to_string(wt.join(magic)).unwrap(),
+        "MAGIC CONTENT\n",
+        "a file named like pathspec magic must still be recovered literally"
+    );
+    cleanup(&root);
+}

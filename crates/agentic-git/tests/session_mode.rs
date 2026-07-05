@@ -689,3 +689,60 @@ fn hooks_are_worktree_scoped_source_checkout_keeps_its_own_hooks() {
     );
     cleanup(&root);
 }
+
+// ── Δ2 stress: many concurrent first-runs must all provision ────────────
+/// A harder version of the Δ2 race: many first-`run`s hammer the SAME repo +
+/// home at once. Provisioning is not concurrency-safe on its own — git's
+/// `worktree add` AND the `config --worktree` hooks wiring both read the shared
+/// worktree list and fatal on a sibling's half-written admin metadata
+/// (`failed to read .git/worktrees/.../commondir`); the per-repo provisioning
+/// lock serializes them. All must succeed, the key stays exactly 32 bytes, and
+/// every binding must verify against the one surviving key.
+#[test]
+fn concurrent_worktree_provision_stress_all_succeed() {
+    const N: usize = 12;
+    let root = tempdir("wt-stress");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    let home = root.join("home");
+
+    let handles: Vec<_> = (0..N)
+        .map(|i| {
+            let repo = repo.clone();
+            let home = home.clone();
+            std::thread::spawn(move || {
+                let agent = format!("stress-{i}");
+                let branch = format!("sess/stress-{i}");
+                let out = run_cli(
+                    &repo,
+                    &home,
+                    &["run", "--agent", agent.as_str(), "--branch", branch.as_str(), "--", "true"],
+                );
+                (agent, out)
+            })
+        })
+        .collect();
+    for h in handles {
+        let (agent, out) = h.join().expect("thread");
+        assert!(
+            out.status.success(),
+            "{agent} failed to provision under concurrency: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let key = std::fs::metadata(home.join(".config-integrity-key")).expect("key must exist");
+    assert_eq!(key.len(), 32, "one 32-byte key survives the race");
+    for i in 0..N {
+        let agent = format!("stress-{i}");
+        let dir = home.join("runtime").join(&agent);
+        let content = std::fs::read_to_string(dir.join("binding.json")).unwrap();
+        let sig = std::fs::read_to_string(dir.join("binding.json.sig")).unwrap();
+        assert!(
+            agentic_git_core::integrity_core::verify(&home, content.as_bytes(), &sig),
+            "{agent}'s binding must verify against the surviving key"
+        );
+    }
+    cleanup(&root);
+}

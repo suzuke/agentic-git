@@ -16,6 +16,7 @@
 #   ./live.sh synth /tmp/l2                    # VERIFIED / FAILED, from state you own
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib.sh
 . "$HERE/lib.sh"
 
@@ -50,12 +51,10 @@ case "$cmd" in
     # shellcheck disable=SC2064
     trap "rmdir '$world/.lock' 2>/dev/null || true" EXIT
 
-    build_world "$world"
+    build_world "$world"   # sets globals incl. RUN_ID
     cp "$HERE/agent-run.sh"    "$world/agent-run.sh"
     cp "$HERE/agent-launch.sh" "$world/agent-launch.sh"
     chmod +x "$world/agent-launch.sh"
-    # shellcheck disable=SC1091
-    . "$world/world.env"
 
     say "World ready: $world"
     printf '  guarded binary : %s\n' "$BIN"

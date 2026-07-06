@@ -17,7 +17,12 @@
 # explicitly at each guarded-run site, so a blanket unset here is safe.
 scrub_hostile_env() {
   local v
-  for v in $(env 2>/dev/null | sed -n 's/^\(AGENTIC_GIT_[A-Za-z0-9_]*\)=.*/\1/p; s/^\(AGEND_GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v" 2>/dev/null || true; done
+  # AGENTIC_GIT_BIN is a deliberate binary override (resolve_bin honours it), not
+  # a hostile knob — keep it; scrub every other agentic-git/agend var.
+  for v in $(env 2>/dev/null | sed -n 's/^\(AGENTIC_GIT_[A-Za-z0-9_]*\)=.*/\1/p; s/^\(AGEND_GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do
+    [ "$v" = AGENTIC_GIT_BIN ] && continue
+    unset "$v" 2>/dev/null || true
+  done
   unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
         GIT_COMMON_DIR GIT_NAMESPACE GIT_CEILING_DIRECTORIES GIT_PREFIX \
         GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM \
@@ -59,32 +64,34 @@ resolve_bin() {
 # ── build the shared world ───────────────────────────────────────────────────
 # Uses the REAL_GIT and BIN globals set by the caller. Writes a run-unique
 # baseline (so a persistent world's freshness is provable) and an atomically
-# published world.env carrying STATE=ready.  build_world <world-dir>
+# published world.env carrying STATE=ready. Also EXPORTS the world's paths and
+# RUN_ID/PROJECT_BASE/CANON_BASE as globals so the caller can use them directly
+# (verify.sh) without re-sourcing world.env.  build_world <world-dir>
 build_world() {
-  local world="$1" project canonical bare home arts rid pbase cbase
+  local world="$1"
   project="$world/project"; canonical="$world/your-checkout"; bare="$world/origin.git"; home="$world/home"; arts="$world/artifacts"
   mkdir -p "$project" "$canonical" "$arts/a" "$arts/b"
-  rid="run-$(date +%Y%m%d%H%M%S)-$$"
+  RUN_ID="run-$(date +%Y%m%d%H%M%S)-$$"
   export GIT_AUTHOR_NAME=you GIT_AUTHOR_EMAIL=you@example.com GIT_COMMITTER_NAME=you GIT_COMMITTER_EMAIL=you@example.com
   "$REAL_GIT" init -q --bare "$bare"
   "$REAL_GIT" -C "$project" init -q -b main
   "$REAL_GIT" -C "$project" config user.name you; "$REAL_GIT" -C "$project" config user.email you@example.com
   "$REAL_GIT" -C "$project" remote add origin "$bare"
-  printf 'shared project\nrun: %s\n' "$rid" > "$project/README.md"
-  "$REAL_GIT" -C "$project" add -A; "$REAL_GIT" -C "$project" commit -qm "project baseline ($rid)"
+  printf 'shared project\nrun: %s\n' "$RUN_ID" > "$project/README.md"
+  "$REAL_GIT" -C "$project" add -A; "$REAL_GIT" -C "$project" commit -qm "project baseline ($RUN_ID)"
   "$REAL_GIT" -C "$project" push -q origin main
-  pbase="$("$REAL_GIT" -C "$project" rev-parse HEAD)"
+  PROJECT_BASE="$("$REAL_GIT" -C "$project" rev-parse HEAD)"
   "$REAL_GIT" -C "$canonical" init -q -b main
   "$REAL_GIT" -C "$canonical" config user.name you; "$REAL_GIT" -C "$canonical" config user.email you@example.com
   "$REAL_GIT" -C "$canonical" remote add origin https://example.invalid/your-project.git
   printf 'your real work\n' > "$canonical/app.py"; "$REAL_GIT" -C "$canonical" add -A; "$REAL_GIT" -C "$canonical" commit -qm base
   "$REAL_GIT" -C "$canonical" commit -q --allow-empty -m more
-  cbase="$("$REAL_GIT" -C "$canonical" rev-parse HEAD)"
-  { printf 'RUN_ID=%s\n' "$rid"
+  CANON_BASE="$("$REAL_GIT" -C "$canonical" rev-parse HEAD)"
+  { printf 'RUN_ID=%s\n' "$RUN_ID"
     printf 'project=%s\n' "$project"; printf 'canonical=%s\n' "$canonical"
     printf 'bare=%s\n' "$bare"; printf 'home=%s\n' "$home"; printf 'arts=%s\n' "$arts"
     printf 'BIN=%s\n' "$BIN"
-    printf 'PROJECT_BASE=%s\n' "$pbase"; printf 'CANON_BASE=%s\n' "$cbase"
+    printf 'PROJECT_BASE=%s\n' "$PROJECT_BASE"; printf 'CANON_BASE=%s\n' "$CANON_BASE"
     printf 'STATE=ready\n'
   } > "$world/world.env.tmp"
   mv "$world/world.env.tmp" "$world/world.env"
@@ -132,7 +139,9 @@ synthesize() {
 
   # I2 origin branches distinct + each trailered to its OWN agent — this alone
   #    catches a cross-agent force-push clobber or delete (no agent word trusted)
-  ta="$("$REAL_GIT" -C "$bare" rev-parse feat/a 2>/dev/null)"; tb="$("$REAL_GIT" -C "$bare" rev-parse feat/b 2>/dev/null)"
+  # --verify -q: a missing ref yields empty + nonzero (never echoes the token),
+  # so a not-yet-pushed branch can't spuriously satisfy the distinct-tips check.
+  ta="$("$REAL_GIT" -C "$bare" rev-parse --verify -q feat/a 2>/dev/null || true)"; tb="$("$REAL_GIT" -C "$bare" rev-parse --verify -q feat/b 2>/dev/null || true)"
   if [ -n "$ta" ] && [ -n "$tb" ] && [ "$ta" != "$tb" ]; then
     pass "both branches on the shared origin, distinct tips (neither deleted/collapsed)"
   else bad "an origin branch was clobbered or deleted (a=$ta b=$tb)"; fi

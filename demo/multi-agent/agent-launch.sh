@@ -22,7 +22,10 @@ WORLD="$(cd "$(dirname "$0")" && pwd)"
 # Strip everything that could redirect/reconfigure git despite `-C`, plus every
 # agentic-git/agend bypass/agent/home/allow knob. HOME/REAL_GIT/BIN are set by us
 # at the run site below, so a blanket unset here is safe.
-for v in $(env 2>/dev/null | sed -n 's/^\(AGENTIC_GIT_[A-Za-z0-9_]*\)=.*/\1/p; s/^\(AGEND_GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v" 2>/dev/null || true; done
+for v in $(env 2>/dev/null | sed -n 's/^\(AGENTIC_GIT_[A-Za-z0-9_]*\)=.*/\1/p; s/^\(AGEND_GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do
+  [ "$v" = AGENTIC_GIT_BIN ] && continue   # deliberate binary override (mirrors lib.sh scrub_hostile_env)
+  unset "$v" 2>/dev/null || true
+done
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
       GIT_COMMON_DIR GIT_NAMESPACE GIT_CEILING_DIRECTORIES GIT_PREFIX \
       GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM \

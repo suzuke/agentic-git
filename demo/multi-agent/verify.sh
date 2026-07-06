@@ -14,6 +14,7 @@
 # session), see live.sh — it reuses lib.sh's build_world + synthesize verbatim.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib.sh
 . "$HERE/lib.sh"
 
@@ -24,9 +25,7 @@ BIN="$(resolve_bin)" || die "agentic-git not found — build from the repo, or s
 
 # ── the shared world (lib.sh owns setup) ─────────────────────────────────────
 work="$(mktemp -d)"; [ "$KEEP" = 1 ] || trap 'rm -rf "$work"' EXIT
-build_world "$work"
-# shellcheck disable=SC1091
-. "$work/world.env"   # project canonical bare home arts BIN PROJECT_BASE CANON_BASE RUN_ID
+build_world "$work"   # sets globals: project canonical bare home arts PROJECT_BASE CANON_BASE RUN_ID
 
 spawn_agent() {  # spawn_agent <role> <artifact-dir>
   local role="$1" art="$2" other

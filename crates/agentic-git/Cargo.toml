@@ -18,3 +18,9 @@ getrandom = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+# Exec reachability invariant (tests/exec_reachability_invariant.rs): AST-walk
+# the crate sources for exec_real_git call sites. Already in the dependency
+# tree transitively — this adds no new crate to the build.
+syn = { version = "2", features = ["full", "visit"] }

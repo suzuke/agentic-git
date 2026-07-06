@@ -76,9 +76,33 @@ want kernel isolation (containers, `sandbox-exec`, Landlock) *underneath* the
 shim. That's why the supervisor keys its checks off repos it owns, not off the
 agent's home.
 
-## Two real agent sessions
+## Two real agents drive it themselves (Layer 2 — `live.sh`)
 
-The scenario runs two real agent *sessions*. Driving them with two real *LLM*
-fleet agents (each executing `agent-run.sh` itself in its own shell) uses the
-same evidence bundle + the same independent synthesis — the supervisor is still
-the verifier.
+`verify.sh` spawns the two guarded sessions itself. `live.sh` runs the **same
+scenario** but lets **two real agents** (or just two shells) each drive one
+guarded session — the same evidence bundle and the **same synthesis** (both live
+in [`lib.sh`](lib.sh), so the rigor can't drift between the two drivers). Real
+LLM agents add *authenticity*, not verification rigor: the rigor is the
+supervisor's re-derivation, which is identical either way.
+
+```sh
+./demo/multi-agent/live.sh setup --world /tmp/l2     # build a persistent world
+#   → prints:  sh /tmp/l2/agent-launch.sh a
+#              sh /tmp/l2/agent-launch.sh b
+# hand ONE command to each of two agents/shells; run them CONCURRENTLY
+./demo/multi-agent/live.sh synth /tmp/l2             # VERIFIED / FAILED, from state you own
+```
+
+`agent-launch.sh` is self-contained: because it runs inside whatever session the
+agent has, it scrubs its own environment (every `GIT_DIR`/`GIT_CONFIG_*` that
+could redirect git despite `-C`, and every agentic-git/agend bypass knob),
+resolves a real non-shim git itself, and reads only the supervisor-written
+`world.env`. It then runs the same `agent-run.sh` and prints a `LAYER2-RESULT`
+line — which is only *material* for the consistency cross-check, never the
+verdict.
+
+Because the world is **persistent** (not a throwaway temp dir), `live.sh setup`
+refuses a non-empty world unless you pass `--reset`, records a run-unique
+baseline, and `synth` requires both agent branches to **descend from this run's
+baseline** — so a prior run's leftover state can never masquerade as a fresh
+pass. The verdict still comes only from repos the supervisor owns.

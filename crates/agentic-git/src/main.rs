@@ -394,6 +394,27 @@ fn shim_main() {
                 );
                 std::process::exit(1);
             }
+            // Cross-branch push guard: a bound agent may push ONLY its assigned
+            // branch (symmetric to the cross-branch checkout deny), so it can't
+            // clobber or delete another agent's branch on a shared remote — which
+            // the protected-ref guard above (main/master/policy only) misses.
+            if let Some(reason) = push_cross_branch_violation(
+                &args,
+                binding.branch.as_deref().unwrap_or(""),
+                &current_branch_of(&worktree),
+                push_default_is_matching(&worktree),
+            ) {
+                emit_deny_error(subcommand, &reason, &agent, Some(&binding));
+                write_git_event_typed(
+                    &home,
+                    &agent,
+                    subcommand,
+                    "deny_cross_branch_push",
+                    None,
+                    Some(&reason),
+                );
+                std::process::exit(1);
+            }
             // #883: best-effort pre-push cleanup of empty `init`
             // heartbeat commits. Failure is logged + we still pass
             // through to real `git push` — cleanup MUST NOT block
@@ -2299,6 +2320,194 @@ fn push_default_is_matching(worktree: &str) -> bool {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "matching")
         .unwrap_or(false)
+}
+
+/// The branch the worktree's HEAD currently points at (`symbolic-ref --short
+/// HEAD`), or empty on detached HEAD / any read failure. Used so the push guard
+/// can refuse an implicit push when the worktree has drifted off its binding.
+fn current_branch_of(worktree: &str) -> String {
+    let git = resolve_real_git();
+    Command::new(&git)
+        .env("AGENTIC_GIT_SHIM_DEPTH", (shim_depth() + 1).to_string())
+        .args(["-C", worktree, "symbolic-ref", "--short", "HEAD"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+struct PushArgv {
+    bulk: bool,
+    delete: bool,
+    positionals: Vec<String>,
+}
+
+/// A push option that consumes the FOLLOWING token as its value (separate-arg
+/// form) — missing one would let its value be mis-read as a remote/refspec. The
+/// `<opt>=<val>` forms are self-contained (caught by the `-`-prefix skip).
+fn push_opt_takes_value(opt: &str) -> bool {
+    matches!(opt, "-o" | "--push-option" | "--receive-pack" | "--exec")
+}
+
+/// `--delete` / `-d` (or an unambiguous long-prefix of `--delete`; `--d`/`--de`
+/// collide with `--dry-run`, so require ≥3 chars). This flag turns the push
+/// positionals into refs to DELETE rather than refspecs.
+fn is_delete_push_flag(arg: &str) -> bool {
+    arg == "-d"
+        || matches!(arg.strip_prefix("--"), Some(n) if n.len() >= 3 && "delete".starts_with(n))
+}
+
+/// Option-aware parse of a `push` argv into (bulk?, delete?, positionals) — skips
+/// flags and the values of value-taking options, so a positional is genuinely a
+/// remote/ref (not e.g. a `-o` push-option value). fugu design review: a bare
+/// positional-count heuristic mis-reads `--delete <ref>` and option values.
+fn parse_push_argv(args: &[String]) -> PushArgv {
+    let mut p = PushArgv {
+        bulk: false,
+        delete: false,
+        positionals: Vec::new(),
+    };
+    let mut i = 1; // skip "push"
+    while i < args.len() {
+        let a = &args[i];
+        if push_opt_takes_value(a) {
+            i += 2; // the option AND its value
+            continue;
+        }
+        if a.starts_with('-') && a != "-" {
+            if is_bulk_push_flag(a) {
+                p.bulk = true;
+            }
+            if is_delete_push_flag(a) {
+                p.delete = true;
+            }
+            i += 1;
+            continue;
+        }
+        p.positionals.push(a.clone());
+        i += 1;
+    }
+    p
+}
+
+/// Strip a leading `refs/heads/` so a ref token compares as a branch name; a
+/// `refs/tags/` prefix is left intact so tag dests stay visible (and exempt).
+fn strip_branch_ref(r: &str) -> &str {
+    r.strip_prefix("refs/heads/").unwrap_or(r)
+}
+
+fn cross_branch_push_msg(assigned: &str, dest: &str) -> String {
+    format!(
+        "cross-branch push — you are bound to '{assigned}', so you may only push that \
+         branch, not '{dest}'. Force-pushing another agent's branch would clobber their \
+         work; push `HEAD:refs/heads/{assigned}` (or open a PR)."
+    )
+}
+
+/// A BOUND agent may push ONLY its OWN assigned branch — the symmetric partner
+/// to the cross-branch checkout deny. Prevents one agent clobbering (or deleting)
+/// another agent's branch on a shared remote, which the protected-ref guard
+/// (main/master/policy only) does NOT catch. Runs ALONGSIDE the existing push
+/// guards (fugu: coexist; protected gives better messages for main/master).
+/// `None` = allow. Tag pushes (`--tags`, `refs/tags/…`, `tag <name>`) are exempt
+/// from the BRANCH guard.
+fn push_cross_branch_violation(
+    args: &[String],
+    assigned: &str,
+    current_branch: &str,
+    push_default_matching: bool,
+) -> Option<String> {
+    if assigned.is_empty() {
+        return None; // unbound: every mutation is already denied upstream
+    }
+    let p = parse_push_argv(args);
+    if p.bulk {
+        return Some(format!(
+            "`--all`/`--mirror` pushes EVERY local branch, not just your assigned \
+             '{assigned}' — push an explicit refspec of your own branch"
+        ));
+    }
+    if p.delete {
+        // positionals = [remote?] + refs-to-delete; a remote is present only with
+        // ≥2 positionals (with 1 it IS the ref to delete — never skip it, fugu #d).
+        let refs: &[String] = if p.positionals.len() >= 2 {
+            &p.positionals[1..]
+        } else {
+            &p.positionals
+        };
+        if let Some(r) = refs.first() {
+            let name = strip_branch_ref(r);
+            return Some(format!(
+                "cross-branch delete — bound to '{assigned}'; deleting '{name}' through the \
+                 shim is refused ({}). Branch lifecycle is the orchestrator's job.",
+                if name == assigned {
+                    "your own task branch"
+                } else {
+                    "another agent's branch"
+                }
+            ));
+        }
+        return None; // `--delete` with no ref → git errors on its own
+    }
+    // Normal mode: first positional (if any) is the remote; the rest are refspecs.
+    let refspecs: &[String] = p.positionals.get(1..).unwrap_or(&[]);
+    if refspecs.is_empty() {
+        // Implicit push — dest inferred from the current branch + push.default.
+        if current_branch != assigned {
+            return Some(format!(
+                "your worktree HEAD is on '{current_branch}', not your assigned '{assigned}' \
+                 — an implicit push's destination is ambiguous; push \
+                 `HEAD:refs/heads/{assigned}` explicitly"
+            ));
+        }
+        if push_default_matching {
+            return Some(
+                "push.default=matching with no refspec could push branches other than your \
+                 assigned one — push an explicit refspec of your own branch"
+                    .to_string(),
+            );
+        }
+        return None; // current == assigned, non-matching → pushes only assigned
+    }
+    let mut idx = 0;
+    while idx < refspecs.len() {
+        let rs = refspecs[idx].strip_prefix('+').unwrap_or(refspecs[idx].as_str());
+        if rs == "tag" {
+            idx += 2; // `tag <name>` — a tag push, not a branch (skip both tokens)
+            continue;
+        }
+        let dest: &str = match rs.split_once(':') {
+            None => {
+                // single ref: pushes branch <ref> (or HEAD → the current branch)
+                if rs == "HEAD" {
+                    current_branch
+                } else {
+                    strip_branch_ref(rs)
+                }
+            }
+            Some((_src, dst)) => {
+                if dst == "HEAD" {
+                    // pushing to the remote's HEAD is not your assigned branch
+                    return Some(cross_branch_push_msg(assigned, "HEAD"));
+                }
+                strip_branch_ref(dst)
+            }
+        };
+        if dest.starts_with("refs/tags/") {
+            idx += 1;
+            continue; // tag dest — not a branch
+        }
+        if dest.contains('*') {
+            return Some(format!(
+                "wildcard refspec dest `{dest}` could write another agent's branch — push an \
+                 explicit single-ref refspec of your own branch '{assigned}'"
+            ));
+        }
+        if dest != assigned {
+            return Some(cross_branch_push_msg(assigned, dest));
+        }
+        idx += 1;
+    }
+    None
 }
 
 // ── Exec ────────────────────────────────────────────────────────────────

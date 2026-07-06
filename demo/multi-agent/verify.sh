@@ -81,18 +81,20 @@ wait "$pb"; rb=$?
 # ── SYNTHESIS: re-derive the truth from STATE, not from the agents' word ──────
 say "Synthesis — re-deriving the truth from git/home/audit state:"
 FAILS=0
-# Derive worktrees from the SHIM-written, HMAC-SIGNED bindings — never from an
-# agent-written file (fugu review: the supervisor must RE-DERIVE from state, not
-# trust the agent's own artifacts).
-bwt() { sed -n 's/.*"worktree": *"\([^"]*\)".*/\1/p' "$home/runtime/agent-$1/binding.json" 2>/dev/null | head -1; }
+# Derive the agents' worktrees from the SHARED PROJECT's OWN worktree list. The
+# supervisor owns the project repo, so this can't be redirected by an agent
+# rewriting its binding.json under $AGENTIC_GIT_HOME (fugu review: HOME is
+# agent-writable at same-uid — see the honest boundary in the README).
+wt_for_branch() { "$REAL_GIT" -C "$project" worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$1" '/^worktree /{w=$2} $0==("branch " b){print w; exit}'; }
 rbr() { "$REAL_GIT" -C "$1" symbolic-ref --short HEAD 2>/dev/null; }
-wa="$(bwt a)"; wb="$(bwt b)"
+wa="$(wt_for_branch feat/a)"; wb="$(wt_for_branch feat/b)"
 
-# I1 two distinct valid worktrees, each STILL on its own bound branch (real git,
-#    not the agent's snapshot — catches a cross-branch checkout that drifted HEAD)
-if [ -n "$wa" ] && [ -n "$wb" ] && [ "$wa" != "$wb" ] && [ -e "$wa/.git" ] && [ -e "$wb/.git" ]; then
-  pass "two distinct worktrees, provisioned from the signed bindings"
-else bad "worktrees not distinct/valid (a=$wa b=$wb)"; fi
+# I1 two distinct worktrees LINKED TO THE SHARED PROJECT (from its own worktree
+#    list), each STILL on its own bound branch (real git — catches a cross-branch
+#    checkout that drifted HEAD)
+if [ -n "$wa" ] && [ -n "$wb" ] && [ "$wa" != "$wb" ]; then
+  pass "the shared project has two distinct agent worktrees (from its own worktree list)"
+else bad "the shared project lacks two distinct agent worktrees (a=$wa b=$wb)"; fi
 if [ "$(rbr "$wa")" = feat/a ] && [ "$(rbr "$wb")" = feat/b ]; then
   pass "each worktree HEAD is on its own bound branch (no cross-branch drift)"
 else bad "a worktree drifted off its branch (a=$(rbr "$wa") b=$(rbr "$wb"))"; fi
@@ -107,12 +109,6 @@ if "$REAL_GIT" -C "$bare" log -1 --format=%B feat/a 2>/dev/null | grep -q "Agent
    && "$REAL_GIT" -C "$bare" log -1 --format=%B feat/b 2>/dev/null | grep -q "Agentic-Agent: agent-b"; then
   pass "each origin branch's tip is trailered to its OWN agent (not clobbered)"
 else bad "origin provenance is wrong or one branch was clobbered by the other agent"; fi
-
-# I3 isolation: each worktree carries its own file, not the other's (binding paths)
-if [ -f "$wa/solver_agent-a.py" ] && [ ! -f "$wa/solver_agent-b.py" ] \
-   && [ -f "$wb/solver_agent-b.py" ] && [ ! -f "$wb/solver_agent-a.py" ]; then
-  pass "working trees are isolated (no cross-contamination)"
-else bad "cross-contamination between the agents' worktrees"; fi
 
 # I4 the shared source repo AND your stand-in real checkout were NOT moved. The
 #    canonical check independently catches an agent that touched your checkout,

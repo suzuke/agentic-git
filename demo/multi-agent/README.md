@@ -50,12 +50,28 @@ synthesis fails, and the scenario reports FAILED. It is designed to catch a
 regression of exactly the cross-agent-clobber gap this scenario's design first
 surfaced.
 
-## Notes
+## What the supervisor trusts (and what it can't)
 
-- Honest boundary: agentic-git is a **seatbelt, not a cage** (same-uid userspace
-  shim). This proves isolation *through the shim* — the guarded git surface.
-  A determined agent calling `/usr/bin/git` directly is out of scope; for that
-  you want kernel isolation underneath.
-- The scenario runs two real agent *sessions*. Driving them with two real *LLM*
-  fleet agents (each executing `agent-run.sh` itself) is the same evidence
-  bundle + the same independent synthesis — the supervisor is still the verifier.
+The supervisor re-derives every invariant from state **it owns** — the shared
+project repo (and its own worktree list), the bare origin, the stand-in
+checkout, their recorded base commits. It does **not** trust anything an agent
+writes under `$AGENTIC_GIT_HOME` (bindings, evidence files, its own verdict):
+those are cross-checked for consistency but can never turn a real violation into
+a pass.
+
+**Honest boundary.** agentic-git is a **seatbelt, not a cage** — a same-uid
+userspace shim. This scenario proves the guards hold for agents going *through
+the shim* (the tool's threat model: accident-prone, semi-trusted agents). It
+does **not** — and cannot — defend against a *malicious* same-uid agent that
+forges its own `$AGENTIC_GIT_HOME` state (it can even read the HMAC key and
+re-sign) or bypasses the shim by calling `/usr/bin/git` directly. For that you
+want kernel isolation (containers, `sandbox-exec`, Landlock) *underneath* the
+shim. That's why the supervisor keys its checks off repos it owns, not off the
+agent's home.
+
+## Two real agent sessions
+
+The scenario runs two real agent *sessions*. Driving them with two real *LLM*
+fleet agents (each executing `agent-run.sh` itself in its own shell) uses the
+same evidence bundle + the same independent synthesis — the supervisor is still
+the verifier.

@@ -57,6 +57,7 @@ PROJECT_BASE="$("$REAL_GIT" -C "$project" rev-parse HEAD)"
 "$REAL_GIT" -C "$canonical" remote add origin https://example.invalid/your-project.git
 printf 'your real work\n' > "$canonical/app.py"; "$REAL_GIT" -C "$canonical" add -A; "$REAL_GIT" -C "$canonical" commit -qm base
 "$REAL_GIT" -C "$canonical" commit -q --allow-empty -m more
+CANON_BASE="$("$REAL_GIT" -C "$canonical" rev-parse HEAD)"
 
 spawn_agent() {  # spawn_agent <role> <artifact-dir>
   local role="$1" art="$2" other
@@ -80,64 +81,81 @@ wait "$pb"; rb=$?
 # ── SYNTHESIS: re-derive the truth from STATE, not from the agents' word ──────
 say "Synthesis — re-deriving the truth from git/home/audit state:"
 FAILS=0
-ev() { grep "^$2=" "$arts/$1/evidence.env" 2>/dev/null | head -1 | cut -d= -f2-; }
+# Derive worktrees from the SHIM-written, HMAC-SIGNED bindings — never from an
+# agent-written file (fugu review: the supervisor must RE-DERIVE from state, not
+# trust the agent's own artifacts).
+bwt() { sed -n 's/.*"worktree": *"\([^"]*\)".*/\1/p' "$home/runtime/agent-$1/binding.json" 2>/dev/null | head -1; }
+rbr() { "$REAL_GIT" -C "$1" symbolic-ref --short HEAD 2>/dev/null; }
+wa="$(bwt a)"; wb="$(bwt b)"
 
-# S1 two distinct, valid worktrees, each on its own branch
-wa="$(ev a WORKTREE)"; wb="$(ev b WORKTREE)"; ba="$(ev a BRANCH)"; bb="$(ev b BRANCH)"
-{ [ -n "$wa" ] && [ -n "$wb" ] && [ "$wa" != "$wb" ]; } && pass "two distinct worktrees ($ba, $bb)" || bad "worktrees not distinct: '$wa' vs '$wb'"
-{ [ "$ba" = feat/a ] && [ "$bb" = feat/b ]; } && pass "each agent on its own bound branch" || bad "branch binding wrong: a=$ba b=$bb"
+# I1 two distinct valid worktrees, each STILL on its own bound branch (real git,
+#    not the agent's snapshot — catches a cross-branch checkout that drifted HEAD)
+if [ -n "$wa" ] && [ -n "$wb" ] && [ "$wa" != "$wb" ] && [ -e "$wa/.git" ] && [ -e "$wb/.git" ]; then
+  pass "two distinct worktrees, provisioned from the signed bindings"
+else bad "worktrees not distinct/valid (a=$wa b=$wb)"; fi
+if [ "$(rbr "$wa")" = feat/a ] && [ "$(rbr "$wb")" = feat/b ]; then
+  pass "each worktree HEAD is on its own bound branch (no cross-branch drift)"
+else bad "a worktree drifted off its branch (a=$(rbr "$wa") b=$(rbr "$wb"))"; fi
 
-# S2 git resolved to the shim inside BOTH sessions (not the real/outer git)
-{ case "$(ev a GITBIN)" in */bin/git) true;; *) false;; esac && case "$(ev b GITBIN)" in */bin/git) true;; *) false;; esac; } \
-  && pass "both agents' git resolved to the shim ($(ev a GITBIN))" || bad "an agent's git was NOT the shim (a=$(ev a GITBIN) b=$(ev b GITBIN))"
-
-# S3 two branches on the shared origin, distinct tips
+# I2 origin branches distinct + each trailered to its OWN agent — this alone
+#    catches a cross-agent force-push clobber or delete (no agent word trusted)
 ta="$("$REAL_GIT" -C "$bare" rev-parse feat/a 2>/dev/null)"; tb="$("$REAL_GIT" -C "$bare" rev-parse feat/b 2>/dev/null)"
-{ [ -n "$ta" ] && [ -n "$tb" ] && [ "$ta" != "$tb" ]; } && pass "both branches pushed to the shared origin, distinct" || bad "origin branches missing/equal (a=$ta b=$tb)"
+if [ -n "$ta" ] && [ -n "$tb" ] && [ "$ta" != "$tb" ]; then
+  pass "both branches on the shared origin, distinct tips (neither deleted/collapsed)"
+else bad "an origin branch was clobbered or deleted (a=$ta b=$tb)"; fi
+if "$REAL_GIT" -C "$bare" log -1 --format=%B feat/a 2>/dev/null | grep -q "Agentic-Agent: agent-a" \
+   && "$REAL_GIT" -C "$bare" log -1 --format=%B feat/b 2>/dev/null | grep -q "Agentic-Agent: agent-b"; then
+  pass "each origin branch's tip is trailered to its OWN agent (not clobbered)"
+else bad "origin provenance is wrong or one branch was clobbered by the other agent"; fi
 
-# S4 provenance on the origin: each branch's tip is trailered to its OWN agent
-"$REAL_GIT" -C "$bare" log -1 --format=%B feat/a 2>/dev/null | grep -q "Agentic-Agent: agent-a" && pa_ok=1 || pa_ok=0
-"$REAL_GIT" -C "$bare" log -1 --format=%B feat/b 2>/dev/null | grep -q "Agentic-Agent: agent-b" && pb_ok=1 || pb_ok=0
-"$REAL_GIT" -C "$bare" log -1 --format=%B feat/a 2>/dev/null | grep -q "Agentic-Agent: agent-b" && cross=1 || cross=0
-{ [ "$pa_ok" = 1 ] && [ "$pb_ok" = 1 ] && [ "$cross" = 0 ]; } && pass "provenance is per-agent and not mixed" || bad "provenance wrong (a=$pa_ok b=$pb_ok cross=$cross)"
+# I3 isolation: each worktree carries its own file, not the other's (binding paths)
+if [ -f "$wa/solver_agent-a.py" ] && [ ! -f "$wa/solver_agent-b.py" ] \
+   && [ -f "$wb/solver_agent-b.py" ] && [ ! -f "$wb/solver_agent-a.py" ]; then
+  pass "working trees are isolated (no cross-contamination)"
+else bad "cross-contamination between the agents' worktrees"; fi
 
-# S5 no cross-contamination: each worktree has its own file, NOT the other's
-{ [ -f "$wa/solver_agent-a.py" ] && [ ! -f "$wa/solver_agent-b.py" ] \
-  && [ -f "$wb/solver_agent-b.py" ] && [ ! -f "$wb/solver_agent-a.py" ]; } \
-  && pass "agents' working trees are isolated (no cross-contamination)" || bad "cross-contamination between worktrees"
+# I4 the shared source repo AND your stand-in real checkout were NOT moved. The
+#    canonical check independently catches an agent that touched your checkout,
+#    regardless of what the agent reported (closes fugu's forged-artifact hole).
+if [ "$("$REAL_GIT" -C "$project" rev-parse HEAD)" = "$PROJECT_BASE" ] \
+   && [ "$("$REAL_GIT" -C "$project" rev-parse --abbrev-ref HEAD)" = main ]; then
+  pass "the shared source repo's HEAD is untouched"
+else bad "the shared source repo drifted"; fi
+if [ "$("$REAL_GIT" -C "$canonical" rev-parse HEAD)" = "$CANON_BASE" ]; then
+  pass "your stand-in real checkout's HEAD is untouched (containment held)"
+else bad "the canonical checkout HEAD moved ($CANON_BASE -> $("$REAL_GIT" -C "$canonical" rev-parse HEAD))"; fi
 
-# S6 the shared source repo was untouched (agents worked in worktrees)
-now="$("$REAL_GIT" -C "$project" rev-parse HEAD)"; cur="$("$REAL_GIT" -C "$project" rev-parse --abbrev-ref HEAD)"
-{ [ "$now" = "$PROJECT_BASE" ] && [ "$cur" = main ]; } && pass "the shared source repo's HEAD is untouched" || bad "source repo drifted (HEAD=$now branch=$cur)"
-
-# S7 one integrity key, both bindings present (no split-brain)
+# I5 one 32-byte key, both signed bindings (no split-brain)
 ks=$(wc -c < "$home/.config-integrity-key" 2>/dev/null | tr -d ' ')
-{ [ "$ks" = 32 ] && [ -f "$home/runtime/agent-a/binding.json" ] && [ -f "$home/runtime/agent-a/binding.json.sig" ] \
-  && [ -f "$home/runtime/agent-b/binding.json" ] && [ -f "$home/runtime/agent-b/binding.json.sig" ]; } \
-  && pass "one 32-byte key; both agents' signed bindings present" || bad "key/binding split-brain (keysize=$ks)"
+if [ "$ks" = 32 ] && [ -f "$home/runtime/agent-a/binding.json.sig" ] && [ -f "$home/runtime/agent-b/binding.json.sig" ]; then
+  pass "one 32-byte integrity key; both agents' signed bindings present"
+else bad "key/binding split-brain (keysize=$ks)"; fi
 
-# S8 every graded step's real exit code matches its expectation (re-checked from
-#    the raw rc files, not from the agent's verdict) — for BOTH agents
-step_state_ok() { local role="$1" n exp rc bad2=0
+# I6 both agents appear, attributed, in the shared audit log — independent proof
+#    each went through the shim and its activity was recorded to it.
+elog="$home/fleet_events.jsonl"
+if grep -q "agent-a" "$elog" 2>/dev/null && grep -q "agent-b" "$elog" 2>/dev/null; then
+  pass "both agents' activity is recorded, per-agent, in the shared audit log"
+else bad "audit log missing per-agent attribution"; fi
+
+# I7 CONSISTENCY cross-check: each agent's OWN report must AGREE with the truth
+#    above. Authority is the independent state (I1-I6); this only flags an agent
+#    whose self-report disagrees — it can NEVER turn a real violation into a pass.
+consistent() { role="$1"; ok=0
+  [ "$(cat "$arts/$role/verdict.txt" 2>/dev/null)" = PASS ] || ok=1
   for n in $(seq 1 10); do
     exp=$(cat "$arts/$role/$n.expect" 2>/dev/null); rc=$(cat "$arts/$role/$n.rc" 2>/dev/null)
-    case "$exp" in
-      ok)   [ "$rc" = 0 ]  || { bad2=1; printf '      agent-%s step %s expected ok, got rc=%s\n' "$role" "$n" "$rc"; } ;;
-      deny) [ "$rc" != 0 ] || { bad2=1; printf '      agent-%s step %s expected DENY, got rc=%s (guard did not fire!)\n' "$role" "$n" "$rc"; } ;;
-      *)    bad2=1 ;;
-    esac
+    case "$exp" in ok) [ "$rc" = 0 ] || ok=1 ;; deny) [ "$rc" != 0 ] || ok=1 ;; *) ok=1 ;; esac
   done
-  return $bad2
+  return "$ok"
 }
-step_state_ok a && sa=1 || sa=0
-step_state_ok b && sb=1 || sb=0
-{ [ "$sa" = 1 ] && [ "$sb" = 1 ]; } && pass "every guarded step behaved as required (own push ok; cross-agent ops denied)" || bad "a guarded step misbehaved"
+if consistent a; then pass "agent-a's self-report agrees with the re-derived state"; else bad "agent-a self-report inconsistent"; fi
+if consistent b; then pass "agent-b's self-report agrees with the re-derived state"; else bad "agent-b self-report inconsistent"; fi
 
-# S9 each agent's SELF-verdict must be PASS AND agree with the re-derived state
-va=$(cat "$arts/a/verdict.txt" 2>/dev/null); vb=$(cat "$arts/b/verdict.txt" 2>/dev/null)
-{ [ "$va" = PASS ] && [ "$sa" = 1 ]; } && pass "agent-a self-verdict PASS and consistent with state" || bad "agent-a verdict '$va' inconsistent with state"
-{ [ "$vb" = PASS ] && [ "$sb" = 1 ]; } && pass "agent-b self-verdict PASS and consistent with state" || bad "agent-b verdict '$vb' inconsistent with state"
-
-say "$([ "$FAILS" = 0 ] && printf '%sMULTI-AGENT SCENARIO VERIFIED%s — %d invariants held; two agents shared one repo, stayed isolated, kept their provenance, and could not clobber each other.' "$(c '1;32')" "$(c 0)" 9 || printf '%sFAILED%s — %d invariant(s) did not hold.' "$(c '1;31')" "$(c 0)" "$FAILS")"
+if [ "$FAILS" = 0 ]; then
+  say "$(c '1;32')MULTI-AGENT SCENARIO VERIFIED$(c 0) — every invariant held (re-derived from state): two agents shared one repo, stayed isolated, kept per-agent provenance, and could not clobber each other or touch your checkout."
+else
+  say "$(c '1;31')FAILED$(c 0) — $FAILS invariant(s) did not hold."
+fi
 [ "$KEEP" = 1 ] && printf '\n  world kept at: %s\n' "$work"
 exit "$([ "$FAILS" = 0 ] && echo 0 || echo 1)"

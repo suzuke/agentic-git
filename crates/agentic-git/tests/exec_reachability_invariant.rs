@@ -253,22 +253,16 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         // Never legitimate anywhere — main.rs is the crate root and needs no
         // import of its own items.
         match node {
-            syn::UseTree::Path(p) => {
-                if is_exec_ident(&p.ident) {
-                    self.record("use-mention", &p.ident.to_string(), None);
-                }
+            syn::UseTree::Path(p) if is_exec_ident(&p.ident) => {
+                self.record("use-mention", &p.ident.to_string(), None);
             }
-            syn::UseTree::Name(n) => {
-                if is_exec_ident(&n.ident) {
-                    self.record("use-mention", &n.ident.to_string(), None);
-                }
+            syn::UseTree::Name(n) if is_exec_ident(&n.ident) => {
+                self.record("use-mention", &n.ident.to_string(), None);
             }
-            syn::UseTree::Rename(r) => {
-                // Both directions: aliasing the exec fn away, or naming
-                // something ELSE to an exec-fn name (a confusion vector).
-                if is_exec_ident(&r.ident) || is_exec_ident(&r.rename) {
-                    self.record("use-mention", &r.ident.to_string(), None);
-                }
+            // Both directions: aliasing the exec fn away, or naming
+            // something ELSE to an exec-fn name (a confusion vector).
+            syn::UseTree::Rename(r) if is_exec_ident(&r.ident) || is_exec_ident(&r.rename) => {
+                self.record("use-mention", &r.ident.to_string(), None);
             }
             _ => {}
         }

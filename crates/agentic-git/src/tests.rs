@@ -3132,3 +3132,66 @@ fn is_git_invocation_case_sensitive_on_unix() {
     assert!(!is_git_invocation(std::ffi::OsStr::new("GIT")));
     assert!(!is_git_invocation(std::ffi::OsStr::new("Git")));
 }
+
+// ── cross-branch push guard: a bound agent may push ONLY its assigned branch ──
+// (fugu design review's table matrix). Agent bound to `feat/a`, HEAD on feat/a.
+#[test]
+fn cross_branch_push_denied_forms() {
+    let deny = |a: &[&str]| push_cross_branch_violation(&vargs(a), "feat/a", "feat/a", false);
+    for a in [
+        &["push", "origin", "HEAD:feat/b"][..],
+        &["push", "origin", "+HEAD:feat/b"][..],
+        &["push", "origin", "feat/b"][..],
+        &["push", "origin", "feat/a", "feat/b"][..], // second refspec is cross-branch
+        &["push", "origin", "--force", "feat/b"][..],
+        &["push", "origin", "--delete", "feat/b"][..],
+        &["push", "--delete", "feat/b"][..], // no remote — must NOT skip feat/b as remote
+        &["push", "origin", ":feat/b"][..],  // colon-delete of another branch
+        &["push", "origin", "--all"][..],
+        &["push", "origin", "--mirror"][..],
+        &["push", "origin", "refs/heads/feat/b"][..],
+        &["push", "origin", "refs/heads/*"][..], // wildcard
+        &["push", "origin", "feat/a:feat/b"][..],
+        &["push", "origin", "HEAD:HEAD"][..], // push to remote HEAD
+        &["push", "origin", "--delete", "feat/a"][..], // even deleting own branch
+    ] {
+        assert!(deny(a).is_some(), "must be DENIED: {a:?}");
+    }
+    // implicit push while the worktree drifted off its binding
+    assert!(
+        push_cross_branch_violation(&vargs(&["push"]), "feat/a", "feat/x", false).is_some(),
+        "drifted implicit push must be denied"
+    );
+    // push.default=matching with no refspec
+    assert!(
+        push_cross_branch_violation(&vargs(&["push", "origin"]), "feat/a", "feat/a", true).is_some(),
+        "matching no-refspec push must be denied"
+    );
+}
+
+#[test]
+fn cross_branch_push_allowed_forms() {
+    let allow = |a: &[&str]| push_cross_branch_violation(&vargs(a), "feat/a", "feat/a", false);
+    for a in [
+        &["push", "origin", "feat/a"][..],
+        &["push", "origin", "HEAD"][..],
+        &["push", "origin", "HEAD:feat/a"][..],
+        &["push", "origin", "HEAD:refs/heads/feat/a"][..],
+        &["push", "origin", "+feat/a"][..], // force own branch
+        &["push", "origin", "refs/heads/feat/a"][..],
+        &["push"][..],           // implicit, current == assigned, non-matching
+        &["push", "origin"][..], // remote only, implicit
+        &["push", "-u", "origin", "feat/a"][..],
+        &["push", "origin", "--force", "feat/a"][..],
+        &["push", "origin", "refs/tags/v1"][..], // tag dest — exempt
+        &["push", "origin", "--tags"][..],       // tags only — exempt
+        &["push", "origin", "tag", "v1.0"][..],  // `tag <name>` shorthand — exempt
+        &["push", "-o", "ci.skip", "origin", "feat/a"][..], // push-option value not mis-parsed
+        &["push", "--force-with-lease", "origin", "feat/a"][..],
+        &["push", "origin", "feat/a", "refs/tags/v2"][..], // own branch + a tag
+    ] {
+        assert!(allow(a).is_none(), "must be ALLOWED: {a:?} -> {:?}", allow(a));
+    }
+    // an unbound caller (empty assigned) is never restricted here
+    assert!(push_cross_branch_violation(&vargs(&["push", "origin", "feat/b"]), "", "feat/a", false).is_none());
+}

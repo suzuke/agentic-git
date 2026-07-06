@@ -6,9 +6,9 @@ multi-agent invariants hold.
 
 The design point (from an adversarial review): **an agent's own PASS is not
 proof.** Real agents only *execute* and leave a machine-recomputable evidence
-bundle; a separate deterministic **supervisor re-derives the truth from git /
-home / audit state** and judges. An agent that reports PASS but whose state
-disagrees still FAILS.
+bundle; a separate deterministic **supervisor re-derives the truth from state it
+owns** (the shared repos and the audit log — never the agent's home) and judges.
+An agent that reports PASS but whose state disagrees still FAILS.
 
 ```sh
 ./demo/multi-agent/verify.sh          # run it, print the synthesis
@@ -27,28 +27,35 @@ Each runs [`agent-run.sh`](agent-run.sh): it does real work, pushes its own
 branch, tries to interfere with the other agent, and saves every command's raw
 `stdout/stderr/exit-code` plus an evidence snapshot into its artifact dir.
 
-Then the supervisor **re-derives the truth from state** and checks nine invariants:
+Then the supervisor **re-derives the truth from state it owns** — the shared
+project's own worktree list, the bare origin, the stand-in checkout, and their
+recorded base commits — and checks:
 
-1. two distinct worktrees, each on its own bound branch;
-2. `git` inside both sessions resolved to the shim (they were genuinely guarded);
-3. both branches reached the shared origin with distinct tips;
-4. provenance is per-agent and not mixed (feat/a's tip trailers agent-a, feat/b's agent-b);
-5. the working trees are isolated — neither agent's file leaked into the other's;
-6. the shared source repo's HEAD was never touched;
-7. one 32-byte integrity key, both agents' signed bindings present (no split-brain);
-8. **every guarded step behaved** — each agent's own push succeeded, and its
-   cross-agent ops (checkout / force-push / delete of the other's branch, and
-   touching the stand-in real checkout) were all **denied**;
-9. each agent's self-verdict is PASS **and** consistent with the re-derived state.
+1. the shared project has **two distinct agent worktrees** (from its own worktree
+   list), each still **on its own bound branch** (no cross-branch drift);
+2. both branches reached the shared origin with **distinct tips**, each tip
+   **trailered to its own agent** — so neither branch was clobbered or deleted;
+3. the shared source repo's HEAD **and** your stand-in real checkout's HEAD were
+   **never moved** (containment held);
+4. one 32-byte integrity key with both agents' signed bindings (the concurrent
+   provisioning did not split-brain);
+5. both agents' activity is recorded, **attributed per-agent**, in the shared
+   audit log;
+6. each agent's own self-report is **consistent** with the re-derived state — a
+   cross-check that can flag a disagreeing report but can never turn a real
+   violation into a pass.
 
 ## Why it's a real test, not a rosy demo
 
-Invariant 8 reads the actual exit codes. If a guard fails to fire — e.g. before
-the cross-branch push guard landed, `git push origin +HEAD:feat/b` *succeeded*
-and clobbered the other agent's branch — the deny step's exit code is `0`, the
-synthesis fails, and the scenario reports FAILED. It is designed to catch a
-regression of exactly the cross-agent-clobber gap this scenario's design first
-surfaced.
+The load-bearing proofs read **state the supervisor owns**, so a fired guard is
+proven by its *consequence*, not by the agent's word. Before the cross-branch
+push guard landed, `git push origin +HEAD:feat/b` *succeeded* and clobbered the
+other agent's branch — which shows up in the origin as feat/b's tip trailered to
+the **wrong** agent (invariant 2), so the synthesis reports FAILED. A touch of
+your checkout likewise moves its HEAD (invariant 3). The agents' own exit codes
+and verdicts are only the *consistency* cross-check (invariant 6): they can never
+make a real violation pass, because every violation is read from owned state, not
+from the agent's files.
 
 ## What the supervisor trusts (and what it can't)
 

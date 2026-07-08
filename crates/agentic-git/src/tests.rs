@@ -3195,3 +3195,165 @@ fn cross_branch_push_allowed_forms() {
     // an unbound caller (empty assigned) is never restricted here
     assert!(push_cross_branch_violation(&vargs(&["push", "origin", "feat/b"]), "", "feat/a", false).is_none());
 }
+
+// ── #2677 embedder P0: bare force-push requires a lease (feature branches). ──
+
+#[test]
+fn push_force_without_lease_denies_bare_force_to_feature_branch_2677() {
+    // THE core #2677 gate: a bare `--force`/`-f`/`+refspec` to a non-protected
+    // branch is denied — it could silently clobber remote commits. RM: drop the
+    // `!p.force` guard (or stop setting `p.force`) → these go RED.
+    let deny = |a: &[&str]| push_force_without_lease_violation(&vargs(a));
+    for a in [
+        &["push", "--force", "origin", "feat/x"][..],
+        &["push", "-f", "origin", "feat/x"][..],
+        &["push", "-uf", "origin", "feat/x"][..], // bundled short cluster
+        &["push", "-fu", "origin", "feat/x"][..],
+        &["push", "origin", "+feat/x"][..], // +refspec force form
+        &["push", "origin", "+HEAD:feat/x"][..], // +src:dst force form
+        &["push", "--force", "feat/x"][..], // no explicit remote positional
+        &["push", "origin", "--", "+feat/x"][..], // + refspec after end-of-options
+    ] {
+        assert!(deny(a).is_some(), "bare force must be DENIED: {a:?}");
+    }
+    // the deny message carries the executable lease retry sequence.
+    let msg = deny(&["push", "--force", "origin", "feat/x"]).unwrap();
+    assert!(
+        msg.contains("git fetch origin feat/x")
+            && msg.contains("git push --force-with-lease origin feat/x"),
+        "actionable retry seq: {msg}"
+    );
+    // with too few positionals to name (remote, branch), fall back to the generic
+    // template rather than mis-labelling a lone refspec as the remote.
+    assert!(deny(&["push", "--force", "feat/x"])
+        .unwrap()
+        .contains("git push --force-with-lease <remote> <branch>"));
+}
+
+#[test]
+fn push_force_without_lease_allows_lease_and_normal_forms_2677() {
+    // Lease forms are the SAFE way to force → allowed. Normal (non-force) pushes are
+    // untouched (zero regression to legitimate pushes).
+    let allow = |a: &[&str]| push_force_without_lease_violation(&vargs(a));
+    for a in [
+        &["push", "--force-with-lease", "origin", "feat/x"][..],
+        &["push", "--force-with-lease=origin/feat/x", "origin", "feat/x"][..],
+        &["push", "--force-if-includes", "--force-with-lease", "origin", "feat/x"][..],
+        &["push", "origin", "feat/x"][..],
+        &["push", "-u", "origin", "feat/x"][..],
+        &["push"][..],
+        &["push", "origin"][..],
+        &["push", "-o", "ci.skip", "origin", "feat/x"][..], // push-option value not mis-read
+        &["push", "-o", "+val", "origin", "feat/x"][..],    // + inside an option value ≠ force
+    ] {
+        assert!(allow(a).is_none(), "must be ALLOWED: {a:?} -> {:?}", allow(a));
+    }
+}
+
+#[test]
+fn push_force_trailing_bare_force_overrides_lease_2677() {
+    // git makes a trailing `--force` override a `--force-with-lease`, so a bare
+    // `--force` present alongside a lease flag is still unconditional → denied.
+    assert!(push_force_without_lease_violation(&vargs(&[
+        "push", "--force-with-lease", "--force", "origin", "feat/x"
+    ]))
+    .is_some());
+}
+
+#[test]
+fn push_force_pure_deletion_is_exempt_2677() {
+    // Deletions don't overwrite history → exempt from the force gate even with force.
+    let allow = |a: &[&str]| push_force_without_lease_violation(&vargs(a));
+    for a in [
+        &["push", "--force", "origin", ":del"][..], // colon-delete
+        &["push", "--force", "origin", ":a", ":b"][..], // ALL refspecs are deletes
+        &["push", "--force", "origin", "+:del"][..], // force-delete refspec
+        &["push", "--delete", "origin", "foo"][..], // --delete flag (no force needed)
+        &["push", "--force", "--delete", "origin", "foo"][..], // force + --delete
+    ] {
+        assert!(allow(a).is_none(), "pure deletion must be EXEMPT: {a:?} -> {:?}", allow(a));
+    }
+}
+
+#[test]
+fn push_force_mixed_delete_and_overwrite_stays_gated_2677_f1() {
+    // #2677 F1 (CONFIRMED bypass in agend-terminal): a mixed push that deletes one
+    // ref AND force-overwrites another must STAY GATED — the deletion must NOT exempt
+    // the whole push (that was the any-arg bug). RED-first: an any-refspec
+    // `is_pure_delete_push` returns true here → these wrongly return None.
+    let deny = |a: &[&str]| push_force_without_lease_violation(&vargs(a));
+    for a in [
+        &["push", "--force", "origin", ":del", "real"][..],  // delete + overwrite
+        &["push", "--force", "origin", "real", ":del"][..],  // order-independent
+        &["push", "--force", "origin", "+:del", "real"][..], // +delete + overwrite
+        &["push", "origin", "+:del", "real"][..],            // force via + on the delete refspec
+    ] {
+        assert!(deny(a).is_some(), "mixed delete+overwrite must stay GATED: {a:?}");
+    }
+}
+
+#[test]
+fn is_pure_delete_push_is_all_not_any_2677_f1() {
+    // Direct unit pin of the ALL-not-ANY discriminator (the exact #2677 F1 fix).
+    let pure = |a: &[&str]| is_pure_delete_push(&parse_push_argv(&vargs(a)));
+    // ALL refspecs are deletions → pure.
+    assert!(pure(&["push", "origin", ":a"]));
+    assert!(pure(&["push", "origin", ":a", ":b"]));
+    assert!(pure(&["push", "origin", "+:a"]));
+    assert!(pure(&["push", "--delete", "origin", "foo"])); // --delete → every ref a deletion
+    // a single non-delete refspec means NOT pure (force on `real` must stay gated).
+    assert!(!pure(&["push", "origin", ":a", "real"]));
+    assert!(!pure(&["push", "origin", "real", ":a"]));
+    assert!(!pure(&["push", "origin", "feat/x"]));
+    assert!(!pure(&["push", "origin"])); // remote only, no refspec → not a deletion
+}
+
+#[test]
+fn is_bare_force_flag_matches_force_forms_not_lease_2677() {
+    for f in ["--force", "-f", "-uf", "-fu"] {
+        assert!(is_bare_force_flag(f), "{f} must be a bare force flag");
+    }
+    for f in [
+        "--force-with-lease",
+        "--force-with-lease=origin/main",
+        "--force-if-includes",
+        "--forc", // ambiguous long abbrev (git rejects) — not matched
+        "-u",
+        "--",
+        "--tags",
+        "--delete",
+    ] {
+        assert!(!is_bare_force_flag(f), "{f} must NOT be a bare force flag");
+    }
+}
+
+#[test]
+fn push_force_option_value_not_misclassified_as_force_2677_f1() {
+    // reviewer4 F1: git accepts the ATTACHED push-option form `-o<value>`; a value
+    // containing `f` (or a leading `+`) is a push-option VALUE, not a force flag.
+    // RED before the fix: `-o+force` fell through to is_bare_force_flag's
+    // `contains('f')` → force=true → the legitimate non-force push was wrongly DENIED.
+    let allow = |a: &[&str]| push_force_without_lease_violation(&vargs(a));
+    for a in [
+        &["push", "-o+force", "origin", "feat/x"][..], // attached, value has a `+` and `f`
+        &["push", "-oforce", "origin", "feat/x"][..],  // attached, value has `f`
+        &["push", "-oci.f", "origin", "feat/x"][..],
+        &["push", "--push-option=+x", "origin", "feat/x"][..], // long attached (already `--`-safe)
+        &["push", "-o", "ci.f", "origin", "feat/x"][..],       // separate form, control
+    ] {
+        assert!(allow(a).is_none(), "push-option value ≠ force: {a:?} -> {:?}", allow(a));
+    }
+    // The fix must NOT open a reverse fail-open — genuine force STAYS denied even
+    // when clustered with other short flags or sitting next to a push-option.
+    let deny = |a: &[&str]| push_force_without_lease_violation(&vargs(a));
+    for a in [
+        &["push", "-f", "origin", "feat/x"][..],
+        &["push", "-uf", "origin", "feat/x"][..],
+        &["push", "-fu", "origin", "feat/x"][..],
+        &["push", "-fo", "pushopt", "origin", "feat/x"][..], // `-f -o pushopt` — force IS present
+        &["push", "-o", "x", "--force", "origin", "feat/x"][..],
+        &["push", "--force", "-oval", "origin", "feat/x"][..],
+    ] {
+        assert!(deny(a).is_some(), "genuine force must STAY denied: {a:?}");
+    }
+}

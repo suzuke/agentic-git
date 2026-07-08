@@ -15,15 +15,6 @@ use std::process::Command;
 
 use agentic_git_core::integrity_core;
 
-/// Disk-contract filename for the shared HMAC key (mirrors
-/// `agentic_git_core::integrity_core::KEY_FILE`, which is `pub(crate)` to
-/// that crate and therefore not reachable from here — this is the *public*
-/// disk contract the INVARIANT clause documents, not a private implementation
-/// detail we're reaching into). `sign`/`verify` themselves are the only
-/// public API session mode calls.
-const KEY_FILE: &str = ".config-integrity-key";
-const KEY_LEN: usize = 32;
-
 pub fn cli_main() -> ! {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -474,64 +465,7 @@ fn provision_home(home: &Path) -> Result<(), String> {
         let p = home.join(d);
         std::fs::create_dir_all(&p).map_err(|e| format!("create {}: {e}", p.display()))?;
     }
-    ensure_key(home)
-}
-
-/// Δ2: atomic, lock-free first-writer-wins key provisioning. Write to a
-/// unique temp file, fsync, then `hard_link` it into place — `AlreadyExists`
-/// means we lost the race, not that we failed; we discard our tmp and defer
-/// to the survivor. The key path only ever appears fully written (never a
-/// partial/truncated file), matching `integrity_core::read_key`'s
-/// exactly-32-bytes contract.
-fn ensure_key(home: &Path) -> Result<(), String> {
-    let key_path = home.join(KEY_FILE);
-    if let Ok(meta) = std::fs::metadata(&key_path) {
-        if meta.len() as usize == KEY_LEN {
-            return Ok(()); // already provisioned — reuse.
-        }
-        return Err(format!(
-            "integrity key at {} exists but is not exactly {KEY_LEN} bytes (corrupt) — refusing \
-             to overwrite; a guarded session without a signable binding must not silently \
-             degrade. Remove it manually only if you are certain it is safe to regenerate.",
-            key_path.display()
-        ));
-    }
-
-    let mut rand_suffix = [0u8; 8];
-    getrandom::fill(&mut rand_suffix).map_err(|e| format!("getrandom: {e}"))?;
-    let tmp_path = home.join(format!(
-        "key.tmp.{}.{}",
-        std::process::id(),
-        hex_lower(&rand_suffix)
-    ));
-
-    let mut key = [0u8; KEY_LEN];
-    getrandom::fill(&mut key).map_err(|e| format!("getrandom: {e}"))?;
-    {
-        use std::io::Write;
-        let mut f = open_new_0600(&tmp_path).map_err(|e| format!("create temp key: {e}"))?;
-        f.write_all(&key)
-            .map_err(|e| format!("write temp key: {e}"))?;
-        // fsync before the hard_link "publish" — the link must never observe
-        // a not-yet-durable write.
-        let _ = f.sync_all();
-    }
-
-    match std::fs::hard_link(&tmp_path, &key_path) {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&tmp_path);
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            // Someone else won the race; their key stands.
-            let _ = std::fs::remove_file(&tmp_path);
-            Ok(())
-        }
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp_path);
-            Err(format!("hard_link key provisioning: {e}"))
-        }
-    }
+    integrity_core::ensure_key(home)
 }
 
 // ── Preconditions (step 1) ─────────────────────────────────────────────
@@ -1033,7 +967,13 @@ fn run_cmd(raw_args: &[String]) -> ! {
             eprintln!("agentic-git: run: write binding.json: {e}");
             std::process::exit(1);
         }
-        let sig = integrity_core::sign(&home, content.as_bytes());
+        let sig = match integrity_core::sign_binding(&home, content.as_bytes()) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("agentic-git: run: sign binding: {e}");
+                std::process::exit(1);
+            }
+        };
         if let Err(e) = std::fs::write(runtime_dir.join("binding.json.sig"), sig) {
             eprintln!("agentic-git: run: write binding.json.sig: {e}");
             std::process::exit(1);
@@ -1085,19 +1025,3 @@ fn run_cmd(raw_args: &[String]) -> ! {
 
 #[cfg(test)]
 mod tests;
-
-/// Impl-review finding (Δ2 literalism): secret-bearing files must carry
-/// their restrictive mode AT OPEN TIME, not gain it via a later chmod —
-/// `fs::write` + `set_permissions` leaves a umask-dependent window where
-/// another local uid can read the HMAC key and forge binding sidecars.
-/// `create_new` additionally refuses a pre-planted path.
-fn open_new_0600(path: &Path) -> std::io::Result<std::fs::File> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    opts.open(path)
-}

@@ -6,7 +6,9 @@ members = ["crates/agentic-git-core", "crates/agentic-git"]
 # agentic-git-core is the stable contract crate — it stays on its own version
 # and only bumps when its API changes. The shim (crates/agentic-git) sets its
 # own `version` explicitly, so the two can move independently.
-version = "0.1.0"
+# 0.2.0 (embedder P1a): new public API (VerifyError, ensure_key, sign_binding,
+# typed verify) + a breaking `verify` bool→Result change = a 0.x minor bump.
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"

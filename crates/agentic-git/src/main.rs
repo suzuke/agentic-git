@@ -505,6 +505,31 @@ struct Binding {
     worktree: Option<String>,
 }
 
+/// Fail-closed HMAC verify with LOUD diagnosis on scheme skew (embedder P1a).
+/// Preserves today's "anything but authentic → not authentic" posture (every
+/// non-`Ok` fails closed, identical to the former `!verify(..)` bool), but an
+/// `UnsupportedScheme` — the sidecar was signed with an HMAC scheme this shim was
+/// NOT built to verify (signer/verifier from different `agentic-git-core` versions)
+/// — is surfaced LOUD to stderr instead of a silent "unbound", so the drift is
+/// diagnosable rather than a mysterious fleet-wide unbind.
+fn verify_sidecar(home: &str, content: &[u8], tag: &str) -> bool {
+    match integrity_core::verify(Path::new(home), content, tag) {
+        Ok(()) => true,
+        Err(integrity_core::VerifyError::UnsupportedScheme {
+            tag_scheme,
+            runtime_scheme,
+        }) => {
+            eprintln!(
+                "agentic-git: HMAC scheme skew — binding signed with scheme {tag_scheme}, this \
+                 shim implements {runtime_scheme}; signer and verifier were built from different \
+                 agentic-git-core versions — rebuild-together / rebind."
+            );
+            false
+        }
+        Err(_) => false,
+    }
+}
+
 fn read_binding(home: &str, agent: &str) -> Binding {
     let dir = PathBuf::from(home).join("runtime").join(agent);
     let path = dir.join("binding.json");
@@ -521,7 +546,7 @@ fn read_binding(home: &str, agent: &str) -> Binding {
     // blind-write, NOT a security boundary: a same-uid agent could read the key
     // and re-sign (accepted); true sealing needs OS-isolation (parked #1653).
     let tag = std::fs::read_to_string(dir.join("binding.json.sig")).unwrap_or_default();
-    if !integrity_core::verify(Path::new(home), content.as_bytes(), &tag) {
+    if !verify_sidecar(home, content.as_bytes(), &tag) {
         return Binding::default();
     }
     let v: serde_json::Value = match serde_json::from_str(&content) {
@@ -2175,7 +2200,7 @@ fn load_protected_refs(home: &str) -> Vec<String> {
     };
     let tag =
         std::fs::read_to_string(PathBuf::from(home).join("policy.toml.sig")).unwrap_or_default();
-    if !integrity_core::verify(Path::new(home), content.as_bytes(), &tag) {
+    if !verify_sidecar(home, content.as_bytes(), &tag) {
         return refs; // tampered / unsigned → fail-closed (override ignored)
     }
     refs.extend(parse_protected_refs(&content));

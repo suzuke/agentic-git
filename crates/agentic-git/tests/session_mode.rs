@@ -212,7 +212,7 @@ fn test3_binding_sidecar_verifies_and_tamper_is_unbound_deny() {
     let content = std::fs::read_to_string(dir.join("binding.json")).expect("read binding");
     let sig = std::fs::read_to_string(dir.join("binding.json.sig")).expect("read sidecar");
     assert!(
-        agentic_git_core::integrity_core::verify(&home, content.as_bytes(), &sig),
+        agentic_git_core::integrity_core::verify(&home, content.as_bytes(), &sig).is_ok(),
         "freshly written binding must verify"
     );
 
@@ -221,7 +221,7 @@ fn test3_binding_sidecar_verifies_and_tamper_is_unbound_deny() {
     assert_ne!(tampered, content);
     std::fs::write(dir.join("binding.json"), &tampered).unwrap();
     assert!(
-        !agentic_git_core::integrity_core::verify(&home, tampered.as_bytes(), &sig),
+        agentic_git_core::integrity_core::verify(&home, tampered.as_bytes(), &sig).is_err(),
         "tampered binding must fail verify"
     );
 
@@ -497,7 +497,7 @@ fn delta2_concurrent_first_runs_race_key_both_bindings_verify() {
         let content = std::fs::read_to_string(dir.join("binding.json")).unwrap();
         let sig = std::fs::read_to_string(dir.join("binding.json.sig")).unwrap();
         assert!(
-            agentic_git_core::integrity_core::verify(&home, content.as_bytes(), &sig),
+            agentic_git_core::integrity_core::verify(&home, content.as_bytes(), &sig).is_ok(),
             "{agent}'s binding must verify against the one surviving key"
         );
     }
@@ -740,7 +740,7 @@ fn concurrent_worktree_provision_stress_all_succeed() {
         let content = std::fs::read_to_string(dir.join("binding.json")).unwrap();
         let sig = std::fs::read_to_string(dir.join("binding.json.sig")).unwrap();
         assert!(
-            agentic_git_core::integrity_core::verify(&home, content.as_bytes(), &sig),
+            agentic_git_core::integrity_core::verify(&home, content.as_bytes(), &sig).is_ok(),
             "{agent}'s binding must verify against the surviving key"
         );
     }

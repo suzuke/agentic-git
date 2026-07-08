@@ -23,10 +23,13 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
       # Publish gate: `cargo package` with the verify build catches crates that
       # can't stand alone (e.g. an `include_str!` reaching outside the crate) —
-      # the class of bug that silently half-published a release once.
-      - run: cargo package -p agentic-git-core --allow-dirty
-        if: matrix.os == 'ubuntu-latest'
-      - run: cargo package -p agentic-git --allow-dirty
+      # the class of bug that silently half-published a release once. Package BOTH
+      # interdependent crates in ONE invocation so the binary's verify build
+      # resolves `agentic-git-core` from the just-packaged sibling
+      # (build-from-workspace), NOT the older published registry version — required
+      # once the binary uses core API not yet released (embedder migration P1a).
+      # No crates.io publish happens here; the release-time publish stays manual.
+      - run: cargo package -p agentic-git-core -p agentic-git --allow-dirty
         if: matrix.os == 'ubuntu-latest'
 
   # Windows has cfg(windows) code paths (copy-instead-of-symlink shim wiring,

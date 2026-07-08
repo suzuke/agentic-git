@@ -199,3 +199,49 @@ echo "UNTRACKED=$(cat untracked.txt 2>/dev/null || echo MISSING)"
     assert!(s.contains("UNTRACKED=NEW"), "untracked file recovered:\n{s}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// #2677 embedder P0 — WIRING: a bare `git push --force` of the agent's own
+/// (non-protected) bound branch is DENIED by the shim's push arm (not merely by
+/// the unit-tested guard), carrying the actionable `--force-with-lease` retry; a
+/// LEASE force of the same branch is NOT caught by this gate. A real `origin` +
+/// `origin/main` is set up so the earlier trust-root guard (which fails CLOSED on
+/// an unresolved `origin/main..HEAD`) passes and control actually reaches the
+/// force-lease gate — otherwise trust-root would deny first and mask the wiring.
+#[test]
+fn run_session_bare_force_push_denied_wiring_2677() {
+    let root = tmp("force");
+    let repo = root.join("repo");
+    let remote = root.join("remote.git");
+    std::fs::create_dir_all(&repo).unwrap();
+    let rg = real_git();
+    init_repo(&rg, &repo);
+    // bare remote + origin/main so the trust-root range (`origin/main..HEAD`) resolves.
+    git(&rg, &["init", "-q", "--bare", remote.to_str().unwrap()], &root);
+    git(&rg, &["remote", "add", "origin", remote.to_str().unwrap()], &repo);
+    git(&rg, &["push", "-q", "origin", "main"], &repo);
+    git(&rg, &["fetch", "-q", "origin"], &repo);
+    let home = root.join("home");
+
+    let script = r#"
+set -u
+git push --force origin feat/force 2>push.err; echo "PUSH_RC=$?"
+grep -q "bare force-push denied" push.err && echo BARE_DENIED=yes || echo BARE_DENIED=no
+grep -q "force-with-lease" push.err && echo LEASE_MSG=yes || echo LEASE_MSG=no
+# a LEASE force of the same branch must NOT be caught by the bare-force gate
+# (it may still fail/succeed later at real git — we only assert the gate misses it).
+git push --force-with-lease origin feat/force >lease.out 2>lease.err; echo "LEASE_RC=$?"
+grep -q "bare force-push denied" lease.err && echo LEASE_HIT_GATE=yes || echo LEASE_HIT_GATE=no
+"#;
+    let out = run_session(&repo, &home, &rg, "force", "feat/force", script);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "session script failed:\n{}\n{s}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(s.contains("PUSH_RC=1"), "bare force must be denied (shim exit 1):\n{s}");
+    assert!(s.contains("BARE_DENIED=yes"), "the deny must be the force-lease gate:\n{s}");
+    assert!(s.contains("LEASE_MSG=yes"), "deny must carry the --force-with-lease retry:\n{s}");
+    assert!(s.contains("LEASE_HIT_GATE=no"), "a lease force must NOT hit the bare-force gate:\n{s}");
+    let _ = std::fs::remove_dir_all(&root);
+}

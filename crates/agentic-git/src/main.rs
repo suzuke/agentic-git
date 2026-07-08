@@ -375,6 +375,24 @@ fn shim_main() {
                 );
                 std::process::exit(1);
             }
+            // #2677 (embedder P0): a BARE force-push (`--force`/`-f`/`+refspec`) to a
+            // NON-protected branch can silently overwrite another agent's/session's
+            // commits — `push_protected_violation` above ignores force ("HOW not WHAT"),
+            // so it never catches this. Require a lease (footgun-removal, not
+            // capability-removal); pure deletions are exempt (ALL-not-ANY, #2677 F1).
+            // Runs AFTER the protected guard so a protected-ref force is denied there.
+            if let Some(reason) = push_force_without_lease_violation(&args) {
+                emit_deny_error(subcommand, &reason, &agent, Some(&binding));
+                write_git_event_typed(
+                    &home,
+                    &agent,
+                    subcommand,
+                    "deny_force_no_lease",
+                    None,
+                    Some(&reason),
+                );
+                std::process::exit(1);
+            }
             // #4 Δa v5: the snapshot namespace must be shim-unpushable — a
             // "private" ref namespace is not private to `git push`. Two
             // cheap layers (text substring + resolved commit-tip match);
@@ -2338,6 +2356,7 @@ fn current_branch_of(worktree: &str) -> String {
 struct PushArgv {
     bulk: bool,
     delete: bool,
+    force: bool,
     positionals: Vec<String>,
 }
 
@@ -2356,7 +2375,18 @@ fn is_delete_push_flag(arg: &str) -> bool {
         || matches!(arg.strip_prefix("--"), Some(n) if n.len() >= 3 && "delete".starts_with(n))
 }
 
-/// Option-aware parse of a `push` argv into (bulk?, delete?, positionals) — skips
+/// A BARE (unconditional) force FLAG: `--force` (exact) or a single-dash short
+/// cluster containing `f` (`-f`, `-uf`, `-fu`). `--force-with-lease[=…]` and
+/// `--force-if-includes` are the SAFE lease forms — they refuse the push if the
+/// remote moved — and are deliberately NOT matched. `--force` is an exact match:
+/// git rejects the ambiguous abbreviation `--forc` (shared with
+/// `--force-with-lease`), so no long-form abbreviation handling is needed. The
+/// `+refspec` positional force form is detected in `parse_push_argv`, not here.
+fn is_bare_force_flag(arg: &str) -> bool {
+    arg == "--force" || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('f'))
+}
+
+/// Option-aware parse of a `push` argv into (bulk?, delete?, force?, positionals) — skips
 /// flags and the values of value-taking options, so a positional is genuinely a
 /// remote/ref (not e.g. a `-o` push-option value). fugu design review: a bare
 /// positional-count heuristic mis-reads `--delete <ref>` and option values.
@@ -2364,6 +2394,7 @@ fn parse_push_argv(args: &[String]) -> PushArgv {
     let mut p = PushArgv {
         bulk: false,
         delete: false,
+        force: false,
         positionals: Vec::new(),
     };
     let mut i = 1; // skip "push"
@@ -2380,8 +2411,18 @@ fn parse_push_argv(args: &[String]) -> PushArgv {
             if is_delete_push_flag(a) {
                 p.delete = true;
             }
+            if is_bare_force_flag(a) {
+                p.force = true;
+            }
             i += 1;
             continue;
+        }
+        // A `+`-prefixed positional IS a force refspec (`+src:dst`) — bare force via
+        // the refspec form rather than a `--force`/`-f` flag. Detected here (not in
+        // `is_bare_force_flag`) so the option-aware skip above never mistakes a
+        // `-o +val` push-option VALUE for a force refspec.
+        if a.starts_with('+') {
+            p.force = true;
         }
         p.positionals.push(a.clone());
         i += 1;
@@ -2508,6 +2549,83 @@ fn push_cross_branch_violation(
         idx += 1;
     }
     None
+}
+
+/// #t-…93550-2 (embedder P0, ports agend-terminal #2677): a BARE force-push
+/// (`--force`/`-f`/`+refspec`) to a NON-protected branch can SILENTLY OVERWRITE
+/// commits already on the remote branch — another agent's or session's work, or a
+/// wrong-based branch. `push_protected_violation` deliberately ignores force ("HOW
+/// not WHAT") and only guards protected refs, so it never catches this. Require a
+/// LEASE (`--force-with-lease`/`--force-if-includes`) instead: it refuses the push
+/// if the remote moved since the pusher's last fetch, REMOVING the footgun while
+/// KEEPING the legitimate rebase-then-force workflow (footgun-removal, not
+/// capability-removal). Returns an actionable deny reason (with an executable retry
+/// sequence), or `None` to allow.
+///
+/// Runs AFTER `push_protected_violation` in the push arm, so a force-push to a
+/// protected ref is already denied there. Deletions don't overwrite history →
+/// exempt (`is_pure_delete_push`). NB: git makes a trailing `--force` override a
+/// `--force-with-lease`, so ANY bare force present = unconditional and is denied
+/// even if a lease flag co-occurs (`p.force` is set by any bare `--force`/`-f`/`+`).
+fn push_force_without_lease_violation(args: &[String]) -> Option<String> {
+    let p = parse_push_argv(args);
+    if !p.force || is_pure_delete_push(&p) {
+        return None;
+    }
+    let (remote, branch) = force_push_target(&p);
+    let seq = match (remote.as_deref(), branch.as_deref()) {
+        (Some(r), Some(b)) => format!("git fetch {r} {b} && git push --force-with-lease {r} {b}"),
+        _ => "git fetch <remote> <branch> && git push --force-with-lease <remote> <branch>"
+            .to_string(),
+    };
+    Some(format!(
+        "bare force-push denied: `--force` / `-f` / a `+refspec` can SILENTLY OVERWRITE \
+         commits already on the remote branch (another agent's or session's work). Re-run \
+         with a lease — it refuses the push if the remote moved since your last fetch, so you \
+         cannot clobber commits you have not seen:\n  {seq}\nProtected refs stay hard-denied \
+         regardless; this guards feature branches. If you genuinely intend to discard remote \
+         commits, fetch first so the lease baseline is current."
+    ))
+}
+
+/// A PURE deletion push removes refs rather than overwriting history → exempt from
+/// the force gate. `--delete`/`-d` (`p.delete`) makes EVERY named ref a deletion, so
+/// it is unconditionally exempt. Otherwise a push is a pure deletion only when it
+/// names a remote + ≥1 refspec and EVERY refspec is a `:<dest>` colon-deletion (after
+/// an optional `+`).
+///
+/// #2677 F1 (agend-terminal, CONFIRMED bypass): this MUST be ALL-not-ANY. A mixed
+/// `git push --force origin :del real` deletes `:del` AND force-overwrites `real`; an
+/// any-refspec exemption would let `real`'s force through. Exempting only when ALL
+/// refspecs are deletions keeps a lone `:del` (or `--delete`) exempt while a mixed
+/// push stays gated.
+fn is_pure_delete_push(p: &PushArgv) -> bool {
+    if p.delete {
+        return true;
+    }
+    p.positionals.len() > 1
+        && p.positionals[1..]
+            .iter()
+            .all(|a| a.strip_prefix('+').unwrap_or(a).starts_with(':'))
+}
+
+/// Best-effort `(remote, branch)` for the deny message's retry sequence — only when
+/// BOTH are explicitly on the command line (≥2 positionals: a remote followed by a
+/// refspec). With fewer we cannot tell a remote from a refspec, so we return
+/// `(None, None)` and the caller falls back to the generic `<remote> <branch>`
+/// template. Reuses the option-aware `PushArgv.positionals`, so a `-o <val>` value is
+/// never mistaken for a remote/refspec.
+fn force_push_target(p: &PushArgv) -> (Option<String>, Option<String>) {
+    if p.positionals.len() < 2 {
+        return (None, None);
+    }
+    let remote = Some(p.positionals[0].trim_start_matches('+').to_string());
+    let branch = p.positionals.get(1).map(|a| {
+        let a = a.strip_prefix('+').unwrap_or(a);
+        let dest = a.rsplit(':').next().unwrap_or(a);
+        dest.strip_prefix("refs/heads/").unwrap_or(dest).to_string()
+    });
+    (remote, branch)
 }
 
 // ── Exec ────────────────────────────────────────────────────────────────

@@ -2367,6 +2367,19 @@ fn push_opt_takes_value(opt: &str) -> bool {
     matches!(opt, "-o" | "--push-option" | "--receive-pack" | "--exec")
 }
 
+/// A value-taking SHORT option in ATTACHED (glued-value) form, e.g. `-o+force`
+/// = `-o` with push-option value `+force`. Git consumes the REST of the `-o…`
+/// token as the option's value, so it is NEVER a `-f` force cluster (reviewer4 F1:
+/// `git push -o+force` reaches remote push-option handling, not force). `-o` is the
+/// only short value-option `git push` accepts; the separate form `-o <val>` is
+/// handled by `push_opt_takes_value`, and long options use `--opt[=val]` (a `--`
+/// token, already excluded from force/positional classification). This token must
+/// be consumed WHOLE so its value (which may contain `f` or a leading `+`) is never
+/// read as force/delete.
+fn is_attached_short_value_opt(arg: &str) -> bool {
+    arg.len() > 2 && arg.starts_with("-o")
+}
+
 /// `--delete` / `-d` (or an unambiguous long-prefix of `--delete`; `--d`/`--de`
 /// collide with `--dry-run`, so require ≥3 chars). This flag turns the push
 /// positionals into refs to DELETE rather than refspecs.
@@ -2382,6 +2395,12 @@ fn is_delete_push_flag(arg: &str) -> bool {
 /// git rejects the ambiguous abbreviation `--forc` (shared with
 /// `--force-with-lease`), so no long-form abbreviation handling is needed. The
 /// `+refspec` positional force form is detected in `parse_push_argv`, not here.
+///
+/// The `contains('f')` short-cluster test is safe ONLY because the caller
+/// (`parse_push_argv`) first skips the attached push-option token `-o<val>`
+/// (`is_attached_short_value_opt`) — otherwise `-o+force`'s value would misfire it
+/// (reviewer4 F1). `-f` is the sole `f`-bearing short flag `git push` has, so any
+/// remaining single-dash-with-`f` token is a genuine force cluster.
 fn is_bare_force_flag(arg: &str) -> bool {
     arg == "--force" || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('f'))
 }
@@ -2402,6 +2421,12 @@ fn parse_push_argv(args: &[String]) -> PushArgv {
         let a = &args[i];
         if push_opt_takes_value(a) {
             i += 2; // the option AND its value
+            continue;
+        }
+        // Attached glued-value short option (`-o<val>`, e.g. `-o+force`): ONE token —
+        // skip it (never a force cluster; its value may contain `f`/`+`). reviewer4 F1.
+        if is_attached_short_value_opt(a) {
+            i += 1;
             continue;
         }
         if a.starts_with('-') && a != "-" {
@@ -2599,6 +2624,13 @@ fn push_force_without_lease_violation(args: &[String]) -> Option<String> {
 /// any-refspec exemption would let `real`'s force through. Exempting only when ALL
 /// refspecs are deletions keeps a lone `:del` (or `--delete`) exempt while a mixed
 /// push stays gated.
+///
+/// Deliberate fail-CLOSED over-deny (safe — a footgun guard may over-deny when a
+/// clean alternative exists): a CLUSTERED `-df` (force+delete of a non-colon ref)
+/// is denied rather than exempted, because `is_delete_push_flag` matches only the
+/// standalone `-d`/`--delete`, not a `-d` glued into a short cluster. The user can
+/// re-run as `git push --delete …` (exempt) or `--force-with-lease`. Never a
+/// fail-open: the clustered form is denied, not allowed.
 fn is_pure_delete_push(p: &PushArgv) -> bool {
     if p.delete {
         return true;

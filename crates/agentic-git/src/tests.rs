@@ -3326,3 +3326,34 @@ fn is_bare_force_flag_matches_force_forms_not_lease_2677() {
         assert!(!is_bare_force_flag(f), "{f} must NOT be a bare force flag");
     }
 }
+
+#[test]
+fn push_force_option_value_not_misclassified_as_force_2677_f1() {
+    // reviewer4 F1: git accepts the ATTACHED push-option form `-o<value>`; a value
+    // containing `f` (or a leading `+`) is a push-option VALUE, not a force flag.
+    // RED before the fix: `-o+force` fell through to is_bare_force_flag's
+    // `contains('f')` → force=true → the legitimate non-force push was wrongly DENIED.
+    let allow = |a: &[&str]| push_force_without_lease_violation(&vargs(a));
+    for a in [
+        &["push", "-o+force", "origin", "feat/x"][..], // attached, value has a `+` and `f`
+        &["push", "-oforce", "origin", "feat/x"][..],  // attached, value has `f`
+        &["push", "-oci.f", "origin", "feat/x"][..],
+        &["push", "--push-option=+x", "origin", "feat/x"][..], // long attached (already `--`-safe)
+        &["push", "-o", "ci.f", "origin", "feat/x"][..],       // separate form, control
+    ] {
+        assert!(allow(a).is_none(), "push-option value ≠ force: {a:?} -> {:?}", allow(a));
+    }
+    // The fix must NOT open a reverse fail-open — genuine force STAYS denied even
+    // when clustered with other short flags or sitting next to a push-option.
+    let deny = |a: &[&str]| push_force_without_lease_violation(&vargs(a));
+    for a in [
+        &["push", "-f", "origin", "feat/x"][..],
+        &["push", "-uf", "origin", "feat/x"][..],
+        &["push", "-fu", "origin", "feat/x"][..],
+        &["push", "-fo", "pushopt", "origin", "feat/x"][..], // `-f -o pushopt` — force IS present
+        &["push", "-o", "x", "--force", "origin", "feat/x"][..],
+        &["push", "--force", "-oval", "origin", "feat/x"][..],
+    ] {
+        assert!(deny(a).is_some(), "genuine force must STAY denied: {a:?}");
+    }
+}

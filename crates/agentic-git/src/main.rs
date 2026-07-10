@@ -300,7 +300,13 @@ fn shim_main() {
     // THAT repo, not be redirected into the worktree. Post-process the classify
     // result so the (unchanged, unit-tested) `classify` stays cwd-agnostic.
     let action = apply_foreign_repo_passthrough(
-        classify_argv(&args, &binding, parent_is_gh, canonical_cwd, is_agent_caller),
+        classify_argv(
+            &args,
+            &binding,
+            parent_is_gh,
+            canonical_cwd,
+            is_agent_caller,
+        ),
         subcommand,
         norm_args,
         cwd_is_foreign_repo(&binding),
@@ -1426,16 +1432,15 @@ fn classify(
 /// and DENIED, so the value-global-drift bypass can't slip an unrecognized token
 /// past `classify`'s `_` default arm. (A bare unknown subcommand with NO leading
 /// global — `git gc`, an alias — is unaffected; there is no global redirecting it.)
+// Groups (in `classify` order): read-only (status..reflog); config/help/passthrough
+// (config..clone); push; mutating (commit..apply); checkout/switch/worktree;
+// flag-discriminated (restore/update-ref/symbolic-ref).
 const KNOWN_SUBCOMMANDS: &[&str] = &[
-    // read-only group
     "status", "log", "diff", "show", "blame", "ls-files", "ls-tree", "rev-parse", "fetch",
-    "remote", "branch", "tag", "describe", "shortlog", "reflog", // config/help/passthrough group
-    "config", "help", "version", "init", "clone", // push
-    "push", // mutating group
-    "commit", "pull", "reset", "revert", "cherry-pick", "stash", "merge", "rebase", "am", "add",
-    "rm", "mv", "read-tree", "update-index", "apply", // checkout/switch + worktree
-    "checkout", "switch", "worktree", // flag-discriminated arms
-    "restore", "update-ref", "symbolic-ref",
+    "remote", "branch", "tag", "describe", "shortlog", "reflog", "config", "help", "version",
+    "init", "clone", "push", "commit", "pull", "reset", "revert", "cherry-pick", "stash", "merge",
+    "rebase", "am", "add", "rm", "mv", "read-tree", "update-index", "apply", "checkout", "switch",
+    "worktree", "restore", "update-ref", "symbolic-ref",
 ];
 
 fn is_known_git_subcommand(s: &str) -> bool {

@@ -1998,10 +1998,11 @@ fn log_init_heartbeat_forensics(home: &str, agent: &str, args: &[String]) {
 
 // ── #883 pre-push cleanup ───────────────────────────────────────────────
 
-/// #883: drop empty `init` heartbeat commits between `origin/main..HEAD`
-/// before the real `git push` fires. Targets the operator-visible case
-/// (PR #882 saw 16 inits before the real commit on mobile UI). The
-/// cleanup is a local soft-reset to `origin/main` ONLY when EVERY commit
+/// #883: drop empty `init` heartbeat commits between `<default-branch>..HEAD`
+/// (base via `resolve_default_branch_base`, #2390) before the real `git push`
+/// fires. Targets the operator-visible case (PR #882 saw 16 inits before the
+/// real commit on mobile UI). The cleanup is a local soft-reset to that base
+/// ONLY when EVERY commit
 /// in the range is an empty init heartbeat — that's the common case the
 /// operator hit. The mixed-history case (real commits interleaved with
 /// inits) is left for the existing `repo action=cleanup_init_commits`
@@ -2020,9 +2021,20 @@ fn log_init_heartbeat_forensics(home: &str, agent: &str, args: &[String]) {
 /// the `CleanupAndChdirPushPass` arm and may `exit(1)` — a separate guardrail,
 /// not part of this hygiene pass.)
 fn cleanup_init_pile_pre_push(worktree: &str) {
-    // List commits between origin/main..HEAD with hash + subject.
+    // #2390: resolve the default-branch base (not hardcoded origin/main); soft —
+    // an undeterminable/ambiguous base just no-ops this hygiene pass (never blocks
+    // push, unlike the denylist which fails CLOSED on the same Err).
+    let base = match resolve_default_branch_base(worktree) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("agentic-git: #883 pre-push cleanup skipped (default branch: {e})");
+            return;
+        }
+    };
+    let range = format!("{base}..HEAD");
+    // List commits between <base>..HEAD with hash + subject.
     let log_out = match Command::new("git")
-        .args(["log", "origin/main..HEAD", "--format=%H %s"])
+        .args(["log", &range, "--format=%H %s"])
         .current_dir(worktree)
         .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
         .output()
@@ -2071,7 +2083,7 @@ fn cleanup_init_pile_pre_push(worktree: &str) {
     // dropped commits had no file changes).
     if empty_init_hashes.len() == total {
         let reset = Command::new("git")
-            .args(["reset", "--soft", "origin/main"])
+            .args(["reset", "--soft", &base])
             .current_dir(worktree)
             .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
             .status();
@@ -2110,7 +2122,7 @@ fn cleanup_init_pile_pre_push(worktree: &str) {
         .collect();
     let sed_script = sed_parts.join(";");
     let rebase = Command::new("git")
-        .args(["-c", "core.abbrev=7", "rebase", "-i", "origin/main"])
+        .args(["-c", "core.abbrev=7", "rebase", "-i", &base])
         .current_dir(worktree)
         .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
         .env("GIT_SEQUENCE_EDITOR", format!("sed -i.bak '{sed_script}'"))
@@ -2236,28 +2248,106 @@ fn trust_root_basename_denied(repo_relative_path: &str) -> bool {
     TRUST_ROOT_DENY_NAMES.contains(&basename) || basename.ends_with(".jsonl")
 }
 
-/// The repo-relative paths touched by any commit in the push range
-/// (`origin/main..HEAD`) — the union of `--name-only` across the range, so a
-/// trust-root blob added in an intermediate commit is caught even if a later
-/// commit deletes it (the blob is still in the pushed history). Runs real git in
-/// the worktree with `AGENTIC_GIT_BYPASS=1` (mirrors `cleanup_init_pile_pre_push`'s
-/// established range base). Returns `Err(msg)` when the range can't be computed
-/// (e.g. `origin/main` not fetched) so the caller can fail CLOSED.
-fn push_range_files(worktree: &str) -> Result<Vec<String>, String> {
-    let out = Command::new("git")
+/// #2390: resolve the push guards' range base (the remote's default branch)
+/// instead of hardcoding `origin/main`. A non-main-default repo (master / trunk)
+/// otherwise makes `origin/main..HEAD` un-resolvable → the denylist fails CLOSED
+/// → every push is blocked (usability); and a dual-trunk repo whose true default
+/// is master would scan the WRONG base and MISS a trust-root commit reachable
+/// only from the real default (fail-OPEN). Shared by both `push_range_files`
+/// (denylist, hard) and `cleanup_init_pile_pre_push` (hygiene, soft).
+///
+/// Fallback order (conservative — always a TRUNK, never the branch's own upstream):
+/// 1. `git symbolic-ref --short refs/remotes/origin/HEAD` — the authoritative
+///    default WHEN SET. NOT `rev-parse --abbrev-ref origin/HEAD`: that echoes the
+///    literal `"origin/HEAD"` (looks like success) instead of failing when the ref
+///    is unset — the common managed-worktree case that never ran
+///    `git remote set-head`.
+/// 2. Existence-probe the conventional trunks, but ONLY when EXACTLY ONE of
+///    `origin/main` / `origin/master` exists. BOTH present + `origin/HEAD` unset is
+///    ambiguous — we must NOT guess `main` (could scan the wrong base and MISS a
+///    trust-root file only reachable from the true default = a fail-open
+///    false-negative), so it falls to path 3 (#2662).
+/// 3. Otherwise `Err` — the caller fails CLOSED (denylist) / no-ops (cleanup), so
+///    an undeterminable OR ambiguous base stays safe. Remedy (resolves both):
+///    `git remote set-head origin -a`.
+fn resolve_default_branch_base(worktree: &str) -> Result<String, String> {
+    // 1. origin/HEAD, only when explicitly set (symbolic-ref errors cleanly if not).
+    if let Ok(o) = Command::new("git")
+        .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        .current_dir(worktree)
+        .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
+        .output()
+    {
+        if o.status.success() {
+            let head = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if !head.is_empty() {
+                return Ok(head);
+            }
+        }
+    }
+    // 2. Conventional-trunk existence probe — ONLY when EXACTLY ONE of
+    //    origin/main / origin/master exists. BOTH → ambiguous → fail (don't guess:
+    //    scanning the wrong `<trunk>..HEAD` could OMIT a trust-root commit reachable
+    //    only from the true default = a fail-open false-negative, #2662).
+    match (
+        trunk_exists(worktree, "origin/main"),
+        trunk_exists(worktree, "origin/master"),
+    ) {
+        (true, false) => return Ok("origin/main".to_string()),
+        (false, true) => return Ok("origin/master".to_string()),
+        (true, true) => {
+            return Err(
+                "ambiguous default branch: both origin/main and origin/master exist \
+                 and origin/HEAD is unset — cannot safely pick the trunk"
+                    .to_string(),
+            )
+        }
+        (false, false) => {}
+    }
+    // 3. Undeterminable.
+    Err(
+        "cannot resolve the remote default branch: origin/HEAD is unset and neither \
+         origin/main nor origin/master exists"
+            .to_string(),
+    )
+}
+
+/// Does `<rev>` resolve to a commit in `worktree`? `.output()` (not `.status()`)
+/// so the `rev-parse` SHA never leaks onto the shim's stdout.
+fn trunk_exists(worktree: &str, rev: &str) -> bool {
+    Command::new("git")
         .args([
-            "log",
-            "--name-only",
-            "--pretty=format:",
-            "origin/main..HEAD",
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
         ])
+        .current_dir(worktree)
+        .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// The repo-relative paths touched by any commit in the push range
+/// (`<default-branch>..HEAD`, base via [`resolve_default_branch_base`] #2390) —
+/// the union of `--name-only` across the range, so a trust-root blob added in an
+/// intermediate commit is caught even if a later commit deletes it (the blob is
+/// still in the pushed history). Runs real git in the worktree with
+/// `AGENTIC_GIT_BYPASS=1` (mirrors `cleanup_init_pile_pre_push`'s established range
+/// base). Returns `Err(msg)` when the base or range can't be computed (e.g.
+/// undeterminable/ambiguous default branch) so the caller can fail CLOSED.
+fn push_range_files(worktree: &str) -> Result<Vec<String>, String> {
+    let range = format!("{}..HEAD", resolve_default_branch_base(worktree)?);
+    let out = Command::new("git")
+        .args(["log", "--name-only", "--pretty=format:", &range])
         .current_dir(worktree)
         .env("AGENTIC_GIT_BYPASS", "1").env("AGEND_GIT_BYPASS", "1")
         .output()
         .map_err(|e| format!("git log spawn failed: {e}"))?;
     if !out.status.success() {
         return Err(format!(
-            "git log origin/main..HEAD failed: {}",
+            "git log {range} failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
@@ -2292,8 +2382,8 @@ fn push_trust_root_denylist_violation(worktree: &str) -> Option<String> {
             }),
         Err(e) => Some(format!(
             "could not verify the push against the trust-root denylist ({e}); refusing to \
-             push (fail-closed). Fetch origin so `origin/main..HEAD` resolves \
-             (`git fetch origin`), then retry."
+             push (fail-closed). Set the remote's default branch so the range base resolves \
+             (`git remote set-head origin -a`), then retry."
         )),
     }
 }

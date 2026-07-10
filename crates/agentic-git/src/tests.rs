@@ -3357,3 +3357,247 @@ fn push_force_option_value_not_misclassified_as_force_2677_f1() {
         assert!(deny(a).is_some(), "genuine force must STAY denied: {a:?}");
     }
 }
+
+// ── #27: leading git globals must NOT bypass the deny matrix ─────────────
+// `classify_argv` normalizes leading globals (`-C`/`-c`/`--git-dir`/…) via
+// subcommand_index before classify. Tests 1–4 are the RED baseline (pre-fix the
+// global made the subcommand a flag → `_` default arm → Passthrough/ChdirPass,
+// skipping every deny); 5–6 pin that the normalization does NOT over-deny.
+
+/// #27 repro A: `git -C <path> worktree add` must DENY (pre-fix it created a real
+/// worktree — the worktree-lifecycle deny was bypassed).
+#[test]
+fn leading_global_c_does_not_bypass_worktree_deny_27() {
+    let action = classify_argv(
+        &s(&["-C", "/some/repo", "worktree", "add", "/tmp/w"]),
+        &Binding::default(),
+        false,
+        false,
+        true,
+    );
+    assert!(
+        matches!(action, Action::Deny(_)),
+        "git -C … worktree add must DENY, got {action:?}"
+    );
+}
+
+/// #27 repro B: `git -c k=v push …` unbound must DENY (pre-fix the `-c` global
+/// reached real git → protected-ref / force-lease guards bypassed).
+#[test]
+fn leading_global_c_config_does_not_bypass_unbound_push_deny_27() {
+    let action = classify_argv(
+        &s(&["-c", "k=v", "push", "--force", "origin", "main"]),
+        &Binding::default(),
+        false,
+        false,
+        true,
+    );
+    assert!(
+        matches!(action, Action::Deny(_)),
+        "git -c … push unbound must DENY, got {action:?}"
+    );
+}
+
+/// #27 + positional-arg correctness: `git -C <path> checkout <other>` on a BOUND
+/// agent must still hit the cross-branch fence. Proves the normalized arg view
+/// makes classify read `target_branch = args[1]` as the REAL target ("other"),
+/// not the `-C` value. Pre-fix: subcommand="-C" → default arm → ChdirPass.
+#[test]
+fn leading_global_does_not_bypass_cross_branch_fence_27() {
+    let action = classify_argv(
+        &s(&["-C", "/some/repo", "checkout", "other-branch"]),
+        &bound_binding("feat/x", "/tmp/.worktrees/dev"),
+        false,
+        false,
+        true,
+    );
+    match action {
+        Action::Deny(r) => assert!(r.contains("cross-branch"), "must be cross-branch deny: {r}"),
+        other => panic!("git -C … checkout <other> must cross-branch DENY, got {other:?}"),
+    }
+}
+
+/// #27 (reviewer4 edge — multi-global stacking): several stacked globals,
+/// including value-taking `-c`, must ALL be consumed so the real subcommand is
+/// found. `git -C a -c k=v -C b worktree add` unbound → Deny.
+#[test]
+fn stacked_leading_globals_do_not_bypass_deny_27() {
+    let action = classify_argv(
+        &s(&[
+            "-C", "/a", "-c", "k=v", "-C", "/b", "worktree", "add", "/tmp/w",
+        ]),
+        &Binding::default(),
+        false,
+        false,
+        true,
+    );
+    assert!(
+        matches!(action, Action::Deny(_)),
+        "stacked globals + worktree add must DENY, got {action:?}"
+    );
+}
+
+/// #27 must NOT over-deny: a globals-only invocation (`git --version`,
+/// `git --help`) has NO subcommand to hide → stays Passthrough (denying it would
+/// break bare `git --version`). Bare read-only is likewise unchanged.
+#[test]
+fn globals_only_and_readonly_not_over_denied_27() {
+    assert_eq!(
+        classify_argv(&s(&["--version"]), &Binding::default(), false, false, true),
+        Action::Passthrough,
+        "globals-only (no subcommand) must not fail closed"
+    );
+    assert_eq!(
+        classify_argv(&s(&["status"]), &Binding::default(), false, false, true),
+        Action::Passthrough,
+        "bare read-only unbound stays Passthrough (normalization is a no-op)"
+    );
+}
+
+/// #27 normalization must not over-fire: `git -C <path> commit` on a BOUND agent
+/// still routes to its worktree (ChdirPass); a `-C` checkout to the agent's OWN
+/// assigned branch is NOT a cross-branch deny (target=args[1] reads the assigned
+/// branch correctly).
+#[test]
+fn leading_global_preserves_bound_routing_27() {
+    assert_eq!(
+        classify_argv(
+            &s(&["-C", "/x", "commit", "-m", "msg"]),
+            &bound_binding("feat/x", "/tmp/.worktrees/dev"),
+            false,
+            false,
+            true,
+        ),
+        Action::ChdirPass("/tmp/.worktrees/dev".into()),
+        "bound `-C commit` must route to the worktree, not deny"
+    );
+    assert_eq!(
+        classify_argv(
+            &s(&["-C", "/x", "checkout", "feat/x"]),
+            &bound_binding("feat/x", "/tmp/.worktrees/dev"),
+            false,
+            false,
+            true,
+        ),
+        Action::ChdirPass("/tmp/.worktrees/dev".into()),
+        "`-C checkout <own-branch>` must NOT be a cross-branch deny"
+    );
+}
+
+/// #27 seam ① (reviewer4 B1 routing): a BOUND agent's `git -c k=v push …` must
+/// route to `CleanupAndChdirPushPass` — the handler that runs the push guards
+/// (protected-ref / force-lease / cross-branch, now fed the normalized argv).
+/// Pre-fix `-c` made the subcommand a flag → `_` default arm → plain `ChdirPass`,
+/// so `git push` ran with ZERO push guards (the B1 force-push-to-main bypass).
+#[test]
+fn leading_global_bound_push_routes_through_guards_27() {
+    assert_eq!(
+        classify_argv(
+            &s(&["-c", "k=v", "push", "--force", "origin", "main"]),
+            &bound_binding("feat/x", "/tmp/.worktrees/dev"),
+            false,
+            false,
+            true,
+        ),
+        Action::CleanupAndChdirPushPass("/tmp/.worktrees/dev".into()),
+        "bound `-c push` must reach the push handler (guards run), not plain ChdirPass"
+    );
+}
+
+/// #27 seam ② (reviewer4 — value-global drift, the deepest): a SPACE-value global
+/// NOT in `subcommand_index`'s fixed set (e.g. a future `git --foo <val> <sub>`,
+/// modeled with `--attr-source`) makes subcommand_index return the VALUE token as
+/// the "subcommand". Pre-hardening that fell to classify's `_` arm → the SAME
+/// bypass. The fail-closed gate must DENY it (resolved token ∉ known subcommands,
+/// behind a leading global).
+#[test]
+fn unknown_space_value_global_fails_closed_27() {
+    let action = classify_argv(
+        &s(&["--attr-source", "HEAD", "worktree", "add", "/tmp/w"]),
+        &Binding::default(),
+        false,
+        false,
+        true,
+    );
+    assert!(
+        matches!(action, Action::Deny(_)),
+        "an unknown space-value global hiding a subcommand must FAIL CLOSED, got {action:?}"
+    );
+}
+
+/// #27: the `=`-glued global form (`--git-dir=<x>`) is a single token —
+/// subcommand_index skips it and finds the real subcommand → normal deny applies.
+#[test]
+fn equals_form_global_does_not_bypass_deny_27() {
+    let action = classify_argv(
+        &s(&["--git-dir=/some/x", "worktree", "add", "/tmp/w"]),
+        &Binding::default(),
+        false,
+        false,
+        true,
+    );
+    assert!(
+        matches!(action, Action::Deny(_)),
+        "--git-dir=… worktree add must DENY, got {action:?}"
+    );
+}
+
+/// #27: mixed multi-globals (`=`-form + space-value + repeated) all consumed → the
+/// real subcommand is found and denied.
+#[test]
+fn mixed_multi_globals_do_not_bypass_deny_27() {
+    let action = classify_argv(
+        &s(&[
+            "-c",
+            "a=b",
+            "--git-dir=/x",
+            "-C",
+            "/y",
+            "worktree",
+            "add",
+            "/tmp/w",
+        ]),
+        &Binding::default(),
+        false,
+        false,
+        true,
+    );
+    assert!(
+        matches!(action, Action::Deny(_)),
+        "mixed multi-globals + worktree add must DENY, got {action:?}"
+    );
+}
+
+/// #27: the fail-closed allowlist must MIRROR classify's policy arms — every
+/// KNOWN subcommand behind a leading global must reach its real arm (NOT the
+/// "unrecognized …" fail-closed deny), while a genuinely-unhandled subcommand
+/// (`gc`) behind a global DOES fail closed. Guards allowlist/classify drift.
+#[test]
+fn known_subcommands_mirror_classify_arms_27() {
+    let unrecognized = |a: &Action| matches!(a, Action::Deny(r) if r.contains("unrecognized subcommand"));
+    for sub in KNOWN_SUBCOMMANDS {
+        let action = classify_argv(
+            &s(&["-C", "/x", sub]),
+            &bound_binding("feat/x", "/tmp/.worktrees/dev"),
+            false,
+            false,
+            true,
+        );
+        assert!(
+            !unrecognized(&action),
+            "known subcommand {sub:?} behind -C must reach its arm, not fail-closed: {action:?}"
+        );
+    }
+    // A real git subcommand classify has NO policy for, behind a global → fail closed.
+    let action = classify_argv(&s(&["-C", "/x", "gc"]), &Binding::default(), false, false, true);
+    assert!(
+        unrecognized(&action),
+        "unhandled `gc` behind -C must fail closed, got {action:?}"
+    );
+    // …but BARE `git gc` (no leading global) is unchanged (Passthrough) — nothing hiding it.
+    assert_eq!(
+        classify_argv(&s(&["gc"]), &Binding::default(), false, false, true),
+        Action::Passthrough,
+        "bare `git gc` (no global) must keep its pre-#27 Passthrough"
+    );
+}

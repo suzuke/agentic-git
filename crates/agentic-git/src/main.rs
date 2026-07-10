@@ -375,7 +375,7 @@ fn shim_main() {
             // gate); fail-closed (`load_protected_refs`). A normal push of the agent's own
             // branch is untouched.
             if let Some(reason) = push_protected_violation(
-                &args,
+                norm_args, // #27: subcommand-rooted (leading globals stripped)
                 &load_protected_refs(&home),
                 push_default_is_matching(&worktree),
             ) {
@@ -396,7 +396,7 @@ fn shim_main() {
             // so it never catches this. Require a lease (footgun-removal, not
             // capability-removal); pure deletions are exempt (ALL-not-ANY, #2677 F1).
             // Runs AFTER the protected guard so a protected-ref force is denied there.
-            if let Some(reason) = push_force_without_lease_violation(&args) {
+            if let Some(reason) = push_force_without_lease_violation(norm_args) {
                 emit_deny_error(subcommand, &reason, &agent, Some(&binding));
                 write_git_event_typed(
                     &home,
@@ -415,7 +415,7 @@ fn shim_main() {
             // `snapshot::snapshot_push_violation` for the full contract
             // (and its documented, deliberate non-goal: this is accident /
             // casual-explicit prevention, not an exfiltration boundary).
-            if let Some(reason) = snapshot::snapshot_push_violation(&args, &worktree) {
+            if let Some(reason) = snapshot::snapshot_push_violation(norm_args, &worktree) {
                 emit_deny_error(subcommand, &reason, &agent, Some(&binding));
                 write_git_event_typed(
                     &home,
@@ -432,7 +432,7 @@ fn shim_main() {
             // clobber or delete another agent's branch on a shared remote — which
             // the protected-ref guard above (main/master/policy only) misses.
             if let Some(reason) = push_cross_branch_violation(
-                &args,
+                norm_args, // #27: subcommand-rooted (leading globals stripped)
                 binding.branch.as_deref().unwrap_or(""),
                 &current_branch_of(&worktree),
                 push_default_is_matching(&worktree),
@@ -1418,6 +1418,55 @@ fn classify(
 /// subcommand (`git`, `git --version`, `git --help`), leaves args unchanged —
 /// there is no op hidden behind them, so today's Passthrough is preserved (there
 /// is nothing to fail closed on; denying would break bare `git --version`).
+/// #27 (reviewer4 ②③): the git subcommands `classify` has an explicit policy for.
+/// MUST mirror `classify`'s match arms (kept honest by
+/// `known_subcommands_mirror_classify_arms_27`). Used ONLY by the fail-closed
+/// gate in `classify_argv` — a token resolved from BEHIND leading globals that is
+/// NOT in this set is treated as "a global option is hiding the real subcommand"
+/// and DENIED, so the value-global-drift bypass can't slip an unrecognized token
+/// past `classify`'s `_` default arm. (A bare unknown subcommand with NO leading
+/// global — `git gc`, an alias — is unaffected; there is no global redirecting it.)
+const KNOWN_SUBCOMMANDS: &[&str] = &[
+    // read-only group
+    "status", "log", "diff", "show", "blame", "ls-files", "ls-tree", "rev-parse", "fetch",
+    "remote", "branch", "tag", "describe", "shortlog", "reflog", // config/help/passthrough group
+    "config", "help", "version", "init", "clone", // push
+    "push", // mutating group
+    "commit", "pull", "reset", "revert", "cherry-pick", "stash", "merge", "rebase", "am", "add",
+    "rm", "mv", "read-tree", "update-index", "apply", // checkout/switch + worktree
+    "checkout", "switch", "worktree", // flag-discriminated arms
+    "restore", "update-ref", "symbolic-ref",
+];
+
+fn is_known_git_subcommand(s: &str) -> bool {
+    KNOWN_SUBCOMMANDS.contains(&s)
+}
+
+/// #27: classify from a RAW argv, NORMALIZING leading git globals first. The deny
+/// matrix (`classify`) keys on the subcommand token + its positional args; a
+/// caller that puts a leading global BEFORE the subcommand — `git -C <path>
+/// commit`, `git -c k=v push`, `git --git-dir=<x> worktree add` (common outside
+/// agend's "cd into worktree then bare git" pattern) — otherwise made the
+/// subcommand a FLAG, so `classify` fell to its `_` default arm and returned
+/// `Passthrough` (unbound) / plain `ChdirPass` (bound), SILENTLY SKIPPING every
+/// deny arm: worktree-lifecycle, push guards (protected-ref / force-lease /
+/// trust-root), the cross-branch fence, and unbound-write. `subcommand_index`
+/// already skips leading globals (it feeds snapshot + `ChdirPass`'s
+/// `strip_target_overrides`); this wires the SAME normalization into the
+/// classify/deny/audit path. `classify` sees the arg view `[sub_idx..]` so its
+/// positional reads (checkout target = `args[1]`, symbolic-ref / restore / branch
+/// scans over `args[1..]`) stay correct.
+///
+/// FAIL-CLOSED against value-global drift (reviewer4 ②③): `subcommand_index`'s
+/// value-taking-global set is fixed, so an unknown SPACE-value global (a future
+/// `git --foo <val> <subcmd>`) makes it return `<val>` as the subcommand →
+/// `classify`'s `_` arm → the SAME bypass. So when a leading global IS present and
+/// the resolved token is NOT a subcommand `classify` recognizes, DENY. Scope
+/// (reviewer4): glued `-C<path>` / `--` / `--end-of-options` are rejected by real
+/// git itself (exit 129) and are not vectors — this covers space + `=` + multi
+/// globals. Globals with NO subcommand (`git`, `git --version`, `git --help`)
+/// leave args unchanged and Passthrough — no op to hide, nothing to fail closed on
+/// (denying would break bare `git --version`).
 fn classify_argv(
     args: &[String],
     binding: &Binding,
@@ -1425,13 +1474,24 @@ fn classify_argv(
     canonical_cwd: bool,
     is_agent_caller: bool,
 ) -> Action {
-    // #27: resolve the REAL subcommand past leading globals; classify sees the
-    // arg view from that token onward so its positional reads stay aligned.
     let sub_idx = subcommand_index(args);
     let subcmd = sub_idx
         .and_then(|i| args.get(i))
         .map(|s| s.as_str())
         .unwrap_or("");
+    // reviewer4 ②③: a token resolved from BEHIND ≥1 leading global (`sub_idx > 0`)
+    // that classify has no policy for is treated as an option hiding the real
+    // subcommand → fail closed. `sub_idx == Some(0)` (no leading global) and
+    // `None` (globals-only / empty) never trip this — their unknown subcommands
+    // keep the pre-#27 Passthrough.
+    if sub_idx.is_some_and(|i| i > 0) && !is_known_git_subcommand(subcmd) {
+        return Action::Deny(format!(
+            "unrecognized subcommand '{subcmd}' resolved from behind leading git \
+             global options — refusing, since a global may be hiding the real \
+             subcommand from the seatbelt. Run the plain `git <subcommand>` form \
+             (from inside the target directory) instead of prefixing globals."
+        ));
+    }
     let norm_args: &[String] = match sub_idx {
         Some(i) => &args[i..],
         None => args,

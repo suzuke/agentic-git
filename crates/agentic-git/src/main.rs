@@ -167,8 +167,17 @@ fn shim_main() {
         // logging those floods fleet_events for ~zero forensic value). Best-effort,
         // never blocks: the `exec_real_git` below is unchanged.
         if shim_depth() == 0 {
-            let subcommand = args.first().map(|s| s.as_str()).unwrap_or("");
-            if bypass_op_is_audited(subcommand, &args) {
+            // #27: audit the REAL subcommand past leading globals (mirrors the
+            // classify normalization + #2234-Patch-A's deny below), so a bypassed
+            // `git -C x worktree add` is audited as a worktree op, not the `-C`
+            // token. `log_bypass_mutating_op` still records the FULL args verbatim.
+            let sub_idx = subcommand_index(&args);
+            let subcommand = sub_idx
+                .and_then(|i| args.get(i))
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let audit_args: &[String] = sub_idx.map_or(&args[..], |i| &args[i..]);
+            if bypass_op_is_audited(subcommand, audit_args) {
                 let home = env_compat("AGENTIC_GIT_HOME").unwrap_or_default();
                 if !home.is_empty() {
                     let agent = env_compat("AGENTIC_GIT_AGENT").unwrap_or_default();
@@ -223,7 +232,20 @@ fn shim_main() {
 
     // Read binding.
     let binding = read_binding(&home, &agent);
-    let subcommand = args.first().map(|s| s.as_str()).unwrap_or("");
+    // #27: the REAL subcommand, resolved past leading git globals (-C/-c/--git-dir/…)
+    // via subcommand_index — so classify/deny/audit/events key on the actual op, not
+    // a leading flag. `norm_args` is the subcommand-onward arg view fed to classify /
+    // apply_foreign_repo_passthrough so their positional reads stay aligned; the FULL
+    // `args` is still used for exec / strip_target_overrides / snapshot below.
+    let sub_idx = subcommand_index(&args);
+    let subcommand = sub_idx
+        .and_then(|i| args.get(i))
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    let norm_args: &[String] = match sub_idx {
+        Some(i) => &args[i..],
+        None => &args,
+    };
 
     // #2234: loud WARN for the cwd↔bound-worktree drift. When a bound agent's cwd
     // is its `<home>/workspace/<agent>` clone — a SEPARATE git object store from its
@@ -278,16 +300,9 @@ fn shim_main() {
     // THAT repo, not be redirected into the worktree. Post-process the classify
     // result so the (unchanged, unit-tested) `classify` stays cwd-agnostic.
     let action = apply_foreign_repo_passthrough(
-        classify(
-            subcommand,
-            &args,
-            &binding,
-            parent_is_gh,
-            canonical_cwd,
-            is_agent_caller,
-        ),
+        classify_argv(&args, &binding, parent_is_gh, canonical_cwd, is_agent_caller),
         subcommand,
-        &args,
+        norm_args,
         cwd_is_foreign_repo(&binding),
     );
 
@@ -1384,6 +1399,51 @@ fn classify(
             Action::Passthrough
         }
     }
+}
+
+/// #27: classify from a RAW argv, NORMALIZING leading git globals first. The deny
+/// matrix (`classify`) keys on the subcommand token + its positional args; a
+/// caller that puts a leading global BEFORE the subcommand — `git -C <path>
+/// commit`, `git -c k=v push`, `git --git-dir=<x> worktree add` (common outside
+/// agend's "cd into worktree then bare git" pattern) — otherwise made the
+/// subcommand a FLAG, so `classify` fell to its `_` default arm and returned
+/// `Passthrough` (unbound) / plain `ChdirPass` (bound), SILENTLY SKIPPING every
+/// deny arm: worktree-lifecycle, push guards (protected-ref / force-lease /
+/// trust-root), the cross-branch fence, and unbound-write. `subcommand_index`
+/// already skips leading globals (it feeds snapshot + `ChdirPass`'s
+/// `strip_target_overrides`); this wires the SAME normalization into the
+/// classify/deny/audit path. `classify` sees the arg view `[sub_idx..]` so its
+/// positional reads (checkout target = `args[1]`, symbolic-ref / restore / branch
+/// scans over `args[1..]`) stay correct. No leading global, or globals with NO
+/// subcommand (`git`, `git --version`, `git --help`), leaves args unchanged —
+/// there is no op hidden behind them, so today's Passthrough is preserved (there
+/// is nothing to fail closed on; denying would break bare `git --version`).
+fn classify_argv(
+    args: &[String],
+    binding: &Binding,
+    parent_is_gh: bool,
+    canonical_cwd: bool,
+    is_agent_caller: bool,
+) -> Action {
+    // #27: resolve the REAL subcommand past leading globals; classify sees the
+    // arg view from that token onward so its positional reads stay aligned.
+    let sub_idx = subcommand_index(args);
+    let subcmd = sub_idx
+        .and_then(|i| args.get(i))
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    let norm_args: &[String] = match sub_idx {
+        Some(i) => &args[i..],
+        None => args,
+    };
+    classify(
+        subcmd,
+        norm_args,
+        binding,
+        parent_is_gh,
+        canonical_cwd,
+        is_agent_caller,
+    )
 }
 
 // ── `classify`'s checkout/switch arm — named predicates (#2550 W4) ──────

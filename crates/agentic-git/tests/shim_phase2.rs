@@ -60,7 +60,7 @@ fn shim_binary_compiles() {
 #[test]
 fn shim_bypass_global_env() {
     // AGENTIC_GIT_BYPASS=1 → shim should passthrough (tested via source inspection).
-    let src = include_str!("../src/main.rs");
+    let src = include_str!("../src/lib.rs");
     assert!(src.contains("AGENTIC_GIT_BYPASS"), "must check bypass env");
     assert!(
         src.contains("AGENTIC_GIT_BYPASS_AGENT"),
@@ -74,7 +74,7 @@ fn shim_bypass_global_env() {
 
 #[test]
 fn shim_deny_cross_branch_in_source() {
-    let src = include_str!("../src/main.rs");
+    let src = include_str!("../src/lib.rs");
     assert!(
         src.contains("cross-branch"),
         "must deny cross-branch checkout"
@@ -83,13 +83,13 @@ fn shim_deny_cross_branch_in_source() {
 
 #[test]
 fn shim_deny_unbound_mutate_in_source() {
-    let src = include_str!("../src/main.rs");
+    let src = include_str!("../src/lib.rs");
     assert!(src.contains("unbound"), "must deny unbound mutate");
 }
 
 #[test]
 fn shim_deny_worktree_management() {
-    let src = include_str!("../src/main.rs");
+    let src = include_str!("../src/lib.rs");
     assert!(
         src.contains("worktree lifecycle is session-managed"),
         "must deny worktree management"
@@ -98,7 +98,7 @@ fn shim_deny_worktree_management() {
 
 #[test]
 fn shim_writes_git_event_on_deny() {
-    let src = include_str!("../src/main.rs");
+    let src = include_str!("../src/lib.rs");
     assert!(
         src.contains("fleet_events.jsonl"),
         "must write git_event on deny"
@@ -111,7 +111,7 @@ fn shim_writes_git_event_on_deny() {
 
 #[test]
 fn shim_uses_agend_real_git_env_first() {
-    let src = include_str!("../src/main.rs");
+    let src = include_str!("../src/lib.rs");
     assert!(
         src.contains("AGENTIC_GIT_REAL_GIT"),
         "must read AGENTIC_GIT_REAL_GIT first"
@@ -127,7 +127,7 @@ fn shim_uses_agend_real_git_env_first() {
 
 #[test]
 fn shim_excludes_agend_bin_from_which() {
-    let src = include_str!("../src/main.rs");
+    let src = include_str!("../src/lib.rs");
     assert!(
         src.contains("agend_bin") && src.contains("filter"),
         "must exclude $AGENTIC_GIT_HOME/bin from which resolution"
@@ -136,7 +136,7 @@ fn shim_excludes_agend_bin_from_which() {
 
 #[test]
 fn no_self_ipc_in_shim() {
-    let src = include_str!("../src/main.rs");
+    let src = include_str!("../src/lib.rs");
     for (i, line) in src.lines().enumerate() {
         if line.trim().starts_with("//") {
             continue;

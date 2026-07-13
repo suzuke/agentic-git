@@ -333,21 +333,21 @@ fn scan_crate_src() -> Vec<String> {
 fn expected_whitelist() -> BTreeMap<String, usize> {
     let entries = [
         // The two capability definitions themselves.
-        "main.rs :: <top-level> :: def exec_real_git",
-        "main.rs :: <top-level> :: def exec_with_conflict_guidance",
+        "lib.rs :: <top-level> :: def exec_real_git",
+        "lib.rs :: <top-level> :: def exec_with_conflict_guidance",
         // Bypass early path: `if should_bypass()` — audited/deny-checked
         // above the exec (§7 3-layer bypass; #2158 audit; #2234 deny).
-        "main.rs :: shim_main :: call exec_real_git @ if should_bypass",
+        "lib.rs :: shim_main :: call exec_real_git @ if should_bypass",
         // No-agent early path: `if agent.is_empty() || home.is_empty()` —
         // non-agent caller passthrough (#2234 defect#2 instrumentation above).
-        "main.rs :: shim_main :: call exec_real_git @ if is_empty",
+        "lib.rs :: shim_main :: call exec_real_git @ if is_empty",
         // Action dispatch arms — the ONLY post-classify exec points.
-        "main.rs :: shim_main :: call exec_real_git @ dispatch-arm Passthrough (unguarded)",
-        "main.rs :: shim_main :: call exec_real_git @ dispatch-arm ChdirPass (unguarded)",
-        "main.rs :: shim_main :: call exec_real_git @ dispatch-arm CleanupAndChdirPushPass (unguarded)",
+        "lib.rs :: shim_main :: call exec_real_git @ dispatch-arm Passthrough (unguarded)",
+        "lib.rs :: shim_main :: call exec_real_git @ dispatch-arm ChdirPass (unguarded)",
+        "lib.rs :: shim_main :: call exec_real_git @ dispatch-arm CleanupAndChdirPushPass (unguarded)",
         // Conflict-capable ChdirPass arm (`if is_conflict_capable(subcommand)`)
         // routes through the guidance wrapper instead.
-        "main.rs :: shim_main :: call exec_with_conflict_guidance @ dispatch-arm ChdirPass (guarded)",
+        "lib.rs :: shim_main :: call exec_with_conflict_guidance @ dispatch-arm ChdirPass (guarded)",
     ];
     let mut map = BTreeMap::new();
     for e in entries {
@@ -404,7 +404,7 @@ fn exec_reachability_invariant() {
 // fails loudly on a "buggy" tree, not just passes on the good one.
 
 fn real_main_rs() -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
     fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("exec-invariant: cannot read {}: {e}", path.display()))
 }
@@ -416,10 +416,10 @@ fn injected_bare_call_in_main_rs_is_detected() {
         "{}\nfn sneaky_escape(args: &[String]) {{ exec_real_git(args, None); }}\n",
         real_main_rs()
     );
-    let err = diff_against_whitelist(&scan_source("main.rs", &injected))
+    let err = diff_against_whitelist(&scan_source("lib.rs", &injected))
         .expect_err("injected bare call point must violate the invariant");
     assert!(
-        err.contains("main.rs :: sneaky_escape :: call exec_real_git"),
+        err.contains("lib.rs :: sneaky_escape :: call exec_real_git"),
         "violation report must name the injected call site, got:\n{err}"
     );
 }
@@ -498,7 +498,7 @@ fn shadow_definition_in_sibling_module_is_detected() {
 #[test]
 fn removed_call_site_is_detected() {
     // Scan only a stub — every whitelisted occurrence is "missing".
-    let err = diff_against_whitelist(&scan_source("main.rs", "fn main() {}\n"))
+    let err = diff_against_whitelist(&scan_source("lib.rs", "fn main() {}\n"))
         .expect_err("empty tree must report missing whitelist entries");
     assert!(
         err.contains("MISSING"),

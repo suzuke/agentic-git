@@ -242,6 +242,13 @@ fn shim_main() {
         .and_then(|i| args.get(i))
         .map(|s| s.as_str())
         .unwrap_or("");
+
+    // #34: nested submodule--helper at depth > 0 — invoked by real git
+    // internally, not a direct agent call. Pass through without classify/
+    // snapshot/audit; the depth-0 shim already routed the parent operation.
+    if shim_depth() > 0 && subcommand == "submodule--helper" {
+        exec_real_git(&args, None);
+    }
     let norm_args: &[String] = match sub_idx {
         Some(i) => &args[i..],
         None => &args,
@@ -968,6 +975,7 @@ fn is_mutating_local(subcmd: &str) -> bool {
             | "read-tree"
             | "update-index"
             | "apply"
+            | "submodule"
     )
 }
 
@@ -1029,8 +1037,12 @@ fn branch_tag_names_ref(subcmd: &str, args: &[String]) -> bool {
 fn bypass_op_is_audited(subcmd: &str, args: &[String]) -> bool {
     matches!(
         subcmd,
-        "worktree" | "checkout" | "switch" | "reset" | "clean" | "push"
+        "worktree" | "checkout" | "switch" | "reset" | "clean" | "push" | "submodule--helper"
     ) || (subcmd == "branch" && branch_tag_names_ref(subcmd, args))
+        || (subcmd == "submodule" && {
+            let sub_idx = subcommand_index(args).unwrap_or(0);
+            submodule_op_is_write(&args[sub_idx + 1..])
+        })
 }
 
 /// #2158: which bypass layer authorized this op — forensics that distinguishes a
@@ -1059,14 +1071,22 @@ fn apply_foreign_repo_passthrough(
     args: &[String],
     cwd_foreign: bool,
 ) -> Action {
-    match action {
-        Action::ChdirPass(_)
-            if cwd_foreign && (is_mutating_local(subcmd) || branch_tag_names_ref(subcmd, args)) =>
-        {
-            Action::Passthrough
-        }
-        other => other,
+    if !cwd_foreign || !matches!(action, Action::ChdirPass(_)) {
+        return action;
     }
+    if subcmd == "submodule" {
+        let sub_idx = subcommand_index(args).unwrap_or(0);
+        let rest = &args[sub_idx + 1..];
+        return if submodule_op_is_write(rest) {
+            Action::Deny("submodule writes are denied in foreign repositories".into())
+        } else {
+            action
+        };
+    }
+    if is_mutating_local(subcmd) || branch_tag_names_ref(subcmd, args) {
+        return Action::Passthrough;
+    }
+    action
 }
 
 /// #1463: index of the real subcommand in `args` — the first non-option token,
@@ -1154,7 +1174,12 @@ fn effective_cwd_through_globals(args: &[String], sub_idx: usize) -> PathBuf {
 /// canonical protection.
 fn strip_target_overrides(args: &[String]) -> Vec<String> {
     let sub_idx = match subcommand_index(args) {
-        Some(i) if is_mutating_local(args[i].as_str()) => i,
+        Some(i) if is_mutating_local(args[i].as_str()) => {
+            if args[i].as_str() == "submodule" && !submodule_op_is_write(&args[i + 1..]) {
+                return args.to_vec();
+            }
+            i
+        }
         // No subcommand, or a non-mutating one → leave `-C` etc. intact.
         _ => return args.to_vec(),
     };
@@ -1191,6 +1216,31 @@ fn strip_target_overrides(args: &[String]) -> Vec<String> {
     }
     out.extend_from_slice(&args[sub_idx..]);
     out
+}
+
+/// #34: whether the tokens after `submodule` represent a WRITE operation.
+/// Validates the COMPLETE token sequence against the supported read grammar:
+///   [--quiet|-q|--cached]* [status|summary]? [--quiet|-q|--cached]*
+/// Any unconsumed, duplicate-class, or unrecognized token/flag fails closed
+/// as write. Bare (empty rest) is read.
+pub(crate) fn submodule_op_is_write(rest: &[String]) -> bool {
+    const RECOGNIZED: [&str; 3] = ["--quiet", "-q", "--cached"];
+    let mut saw_op = false;
+    for t in rest {
+        let s = t.as_str();
+        if RECOGNIZED.contains(&s) {
+            continue;
+        }
+        if s.starts_with('-') {
+            return true;
+        }
+        if !saw_op && matches!(s, "status" | "summary") {
+            saw_op = true;
+            continue;
+        }
+        return true;
+    }
+    false
 }
 
 /// #1511 follow-up: a MUTATING-form action — deny when unbound, else route to
@@ -1395,6 +1445,20 @@ fn classify(
                 pass_unbound_else_chdir(bound, binding)
             }
         }
+        "submodule" => {
+            let sub_idx = subcommand_index(args).unwrap_or(0);
+            let rest = &args[sub_idx + 1..];
+            if submodule_op_is_write(rest) {
+                deny_unbound_else_chdir(bound, binding)
+            } else {
+                pass_unbound_else_chdir(bound, binding)
+            }
+        }
+        "submodule--helper" => Action::Deny(
+            "direct submodule--helper invocation is not allowed — \
+             submodule operations must go through `git submodule`"
+                .into(),
+        ),
         // Default: passthrough when unbound, chdir when bound.
         _ => {
             if bound {
@@ -1440,7 +1504,7 @@ const KNOWN_SUBCOMMANDS: &[&str] = &[
     "remote", "branch", "tag", "describe", "shortlog", "reflog", "config", "help", "version",
     "init", "clone", "push", "commit", "pull", "reset", "revert", "cherry-pick", "stash", "merge",
     "rebase", "am", "add", "rm", "mv", "read-tree", "update-index", "apply", "checkout", "switch",
-    "worktree", "restore", "update-ref", "symbolic-ref",
+    "worktree", "restore", "update-ref", "symbolic-ref", "submodule", "submodule--helper",
 ];
 
 fn is_known_git_subcommand(s: &str) -> bool {

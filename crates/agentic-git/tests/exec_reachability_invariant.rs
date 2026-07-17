@@ -124,6 +124,8 @@ fn if_condition_desc(cond: &syn::Expr) -> String {
         "if should_bypass".to_string()
     } else if scan.called.iter().any(|c| c == "is_empty") {
         "if is_empty".to_string()
+    } else if scan.called.iter().any(|c| c == "shim_depth") {
+        "if shim_depth".to_string()
     } else {
         "if other".to_string()
     }
@@ -341,6 +343,9 @@ fn expected_whitelist() -> BTreeMap<String, usize> {
         // No-agent early path: `if agent.is_empty() || home.is_empty()` —
         // non-agent caller passthrough (#2234 defect#2 instrumentation above).
         "lib.rs :: shim_main :: call exec_real_git @ if is_empty",
+        // #34: nested submodule--helper at depth > 0 — pass through without
+        // classify/snapshot/audit (the depth-0 shim already routed the parent).
+        "lib.rs :: shim_main :: call exec_real_git @ if shim_depth",
         // Action dispatch arms — the ONLY post-classify exec points.
         "lib.rs :: shim_main :: call exec_real_git @ dispatch-arm Passthrough (unguarded)",
         "lib.rs :: shim_main :: call exec_real_git @ dispatch-arm ChdirPass (unguarded)",

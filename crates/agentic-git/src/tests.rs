@@ -3873,3 +3873,245 @@ fn known_subcommands_mirror_classify_arms_27() {
         "bare `git gc` (no global) must keep its pre-#27 Passthrough"
     );
 }
+
+// ── #34: submodule policy — RED phase ───────────────────────────────────
+// These tests prove the current fail-open gaps. They must all FAIL at
+// baseline 5306c85 and PASS after the GREEN commit.
+
+#[test]
+fn submodule_write_unbound_must_deny_34() {
+    let unbound = Binding {
+        task_id: None,
+        branch: None,
+        worktree: None,
+    };
+    for op in [
+        "init", "update", "deinit", "add", "set-branch", "set-url", "sync", "foreach",
+        "absorbgitdirs",
+    ] {
+        let args = s(&["submodule", op]);
+        let action = classify("submodule", &args, &unbound, false, false, false);
+        assert!(
+            matches!(action, Action::Deny(_)),
+            "unbound `submodule {op}` must Deny, got {action:?}"
+        );
+    }
+}
+
+#[test]
+fn submodule_read_unbound_passthrough_34() {
+    let unbound = Binding {
+        task_id: None,
+        branch: None,
+        worktree: None,
+    };
+    for args_slice in [
+        &["submodule"][..],
+        &["submodule", "status"][..],
+        &["submodule", "summary"][..],
+        &["submodule", "status", "--cached"][..],
+        &["submodule", "--quiet"][..],
+        &["submodule", "--quiet", "status"][..],
+        &["submodule", "--quiet", "summary"][..],
+        &["submodule", "--cached"][..],
+    ] {
+        let args = s(args_slice);
+        let action = classify("submodule", &args, &unbound, false, false, false);
+        assert!(
+            matches!(action, Action::Passthrough),
+            "unbound `{args_slice:?}` must Passthrough (read), got {action:?}"
+        );
+    }
+}
+
+#[test]
+fn submodule_helper_depth0_must_deny_34() {
+    let unbound = Binding {
+        task_id: None,
+        branch: None,
+        worktree: None,
+    };
+    let bound = bound_binding("fix/x", "/wt");
+    let args = s(&["submodule--helper", "update"]);
+    let action_unbound = classify("submodule--helper", &args, &unbound, false, false, false);
+    assert!(
+        matches!(action_unbound, Action::Deny(_)),
+        "top-level submodule--helper must Deny (unbound), got {action_unbound:?}"
+    );
+    let action_bound = classify("submodule--helper", &args, &bound, false, false, false);
+    assert!(
+        matches!(action_bound, Action::Deny(_)),
+        "top-level submodule--helper must Deny (bound too), got {action_bound:?}"
+    );
+}
+
+#[test]
+fn submodule_write_is_mutating_local_34() {
+    assert!(
+        is_mutating_local("submodule"),
+        "submodule must be in the mutating-local set (for strip_target_overrides + foreign gate)"
+    );
+}
+
+#[test]
+fn submodule_write_has_destructive_op_slug_34() {
+    for op in ["init", "update", "deinit", "sync", "foreach"] {
+        assert!(
+            super::snapshot::destructive_op_slug(&s(&["submodule", op])).is_some(),
+            "submodule {op} must have a destructive_op_slug for pre-op snapshot"
+        );
+    }
+    for read in [&["submodule"][..], &["submodule", "status"][..], &["submodule", "summary"][..]] {
+        assert!(
+            super::snapshot::destructive_op_slug(&s(read)).is_none(),
+            "submodule read {read:?} must NOT have a destructive_op_slug"
+        );
+    }
+}
+
+#[test]
+fn submodule_write_bypass_audit_34() {
+    assert!(
+        bypass_op_is_audited("submodule", &s(&["submodule", "update"])),
+        "bypass submodule write must be audited"
+    );
+    assert!(
+        bypass_op_is_audited("submodule--helper", &s(&["submodule--helper"])),
+        "bypass submodule--helper must be audited"
+    );
+    assert!(
+        !bypass_op_is_audited("submodule", &s(&["submodule"])),
+        "bypass bare submodule (read/status) must NOT be audited"
+    );
+    assert!(
+        !bypass_op_is_audited("submodule", &s(&["submodule", "status"])),
+        "bypass submodule status must NOT be audited"
+    );
+    assert!(
+        !bypass_op_is_audited("submodule", &s(&["submodule", "--quiet"])),
+        "bypass bare submodule with --quiet flag (read) must NOT be audited"
+    );
+    assert!(
+        bypass_op_is_audited("submodule", &s(&["submodule", "--quiet", "update"])),
+        "bypass submodule --quiet update (write) must be audited"
+    );
+}
+
+#[test]
+fn submodule_foreign_cwd_write_must_deny_34() {
+    use Action::*;
+    let a = |toks: &[&str]| toks.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let action = apply_foreign_repo_passthrough(
+        ChdirPass("/wt".into()),
+        "submodule",
+        &a(&["submodule", "update"]),
+        true,
+    );
+    assert!(
+        matches!(action, Deny(_)),
+        "foreign cwd submodule write must Deny (not Passthrough), got {action:?}"
+    );
+    let action_read = apply_foreign_repo_passthrough(
+        ChdirPass("/wt".into()),
+        "submodule",
+        &a(&["submodule", "status"]),
+        true,
+    );
+    assert_eq!(
+        action_read,
+        ChdirPass("/wt".into()),
+        "foreign cwd submodule read must stay ChdirPass"
+    );
+}
+
+#[test]
+fn submodule_unknown_op_fail_closed_34() {
+    let unbound = Binding {
+        task_id: None,
+        branch: None,
+        worktree: None,
+    };
+    let args = s(&["submodule", "futureop"]);
+    let action = classify("submodule", &args, &unbound, false, false, false);
+    assert!(
+        matches!(action, Action::Deny(_)),
+        "unbound submodule with unknown operation must Deny (fail-closed), got {action:?}"
+    );
+}
+
+#[test]
+fn submodule_read_preserves_target_overrides_34() {
+    let read_args = s(&["-C", "/other", "submodule", "status"]);
+    let stripped = strip_target_overrides(&read_args);
+    assert_eq!(
+        stripped, read_args,
+        "submodule read must preserve -C target override"
+    );
+    let write_args = s(&["-C", "/other", "submodule", "update"]);
+    let stripped = strip_target_overrides(&write_args);
+    assert!(
+        !stripped.iter().any(|a| a == "-C"),
+        "submodule write must strip -C target override, got {stripped:?}"
+    );
+}
+
+#[test]
+fn submodule_leading_flags_write_34() {
+    let unbound = Binding {
+        task_id: None,
+        branch: None,
+        worktree: None,
+    };
+    for args_slice in [
+        &["submodule", "--quiet", "update"][..],
+        &["submodule", "--quiet", "init"][..],
+        &["submodule", "--quiet", "deinit"][..],
+    ] {
+        let args = s(args_slice);
+        let action = classify("submodule", &args, &unbound, false, false, false);
+        assert!(
+            matches!(action, Action::Deny(_)),
+            "unbound `{args_slice:?}` must Deny (write despite leading flag), got {action:?}"
+        );
+    }
+}
+
+#[test]
+fn submodule_unknown_flag_fail_closed_34() {
+    let unbound = Binding {
+        task_id: None,
+        branch: None,
+        worktree: None,
+    };
+    for args_slice in [
+        &["submodule", "--future-flag"][..],
+        &["submodule", "--verbose", "status"][..],
+        &["submodule", "-v"][..],
+        &["submodule", "--recursive"][..],
+        &["submodule", "status", "--future-flag"][..],
+        &["submodule", "summary", "--future-flag"][..],
+        &["submodule", "status", "some-path"][..],
+        &["submodule", "status", "status"][..],
+    ] {
+        let args = s(args_slice);
+        let action = classify("submodule", &args, &unbound, false, false, false);
+        assert!(
+            matches!(action, Action::Deny(_)),
+            "unbound `{args_slice:?}` must Deny (unknown/trailing = fail-closed write), got {action:?}"
+        );
+    }
+    // Recognized trailing --cached after status/summary must remain read.
+    for args_slice in [
+        &["submodule", "status", "--cached"][..],
+        &["submodule", "summary", "--cached"][..],
+        &["submodule", "status", "--quiet"][..],
+        &["submodule", "--quiet", "status", "--cached"][..],
+    ] {
+        let args = s(args_slice);
+        let action = classify("submodule", &args, &unbound, false, false, false);
+        assert!(
+            matches!(action, Action::Passthrough),
+            "unbound `{args_slice:?}` must Passthrough (recognized trailing read), got {action:?}"
+        );
+    }
+}

@@ -17,7 +17,10 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{env_compat, resolve_real_git, subcommand_index, write_git_event_typed};
+use super::{
+    env_compat, resolve_real_git, subcommand_index, submodule_op_is_write,
+    write_git_event_typed,
+};
 
 /// Amortized + manual prune default TTL (Δd: committer-date based).
 pub(crate) const DEFAULT_TTL_SECS: u64 = 7 * 24 * 60 * 60;
@@ -61,6 +64,7 @@ pub(crate) fn destructive_op_slug(args: &[String]) -> Option<&'static str> {
         "checkout" if checkout_is_destructive(rest) => Some("checkout"),
         "restore" if restore_touches_worktree(rest) => Some("restore"),
         "switch" if switch_is_destructive(rest) => Some("switch"),
+        "submodule" if submodule_op_is_write(rest) => Some("submodule"),
         _ => None,
     }
 }

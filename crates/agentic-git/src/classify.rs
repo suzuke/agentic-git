@@ -71,7 +71,6 @@ pub(crate) fn cwd_is_foreign_repo(binding: &Binding) -> bool {
     paths_are_foreign(&cwd, Path::new(wt))
 }
 
-
 /// #2234 (C): pure decision — is `cwd` the agent's stale WORKSPACE clone rather
 /// than its bound worktree? True iff `cwd` is rooted in the agent's configured
 /// workspace dir (`<home>/workspace/<agent>`) AND that dir is a git object store
@@ -82,7 +81,12 @@ pub(crate) fn cwd_is_foreign_repo(binding: &Binding) -> bool {
 /// must NOT warn. Fail-closed (`false`) on any unresolvable path. Pure (only
 /// reads the filesystem for the passed paths) so the matrix is hermetically
 /// testable without touching the process cwd.
-pub(crate) fn is_workspace_clone_drift(home: &str, agent: &str, cwd: &Path, worktree: &Path) -> bool {
+pub(crate) fn is_workspace_clone_drift(
+    home: &str,
+    agent: &str,
+    cwd: &Path,
+    worktree: &Path,
+) -> bool {
     let ws = PathBuf::from(home).join("workspace").join(agent);
     let (Ok(ws_c), Ok(cwd_c)) = (std::fs::canonicalize(&ws), std::fs::canonicalize(cwd)) else {
         return false;
@@ -747,11 +751,50 @@ pub(crate) fn classify(
 // (config..clone); push; mutating (commit..apply); checkout/switch/worktree;
 // flag-discriminated (restore/update-ref/symbolic-ref).
 pub(crate) const KNOWN_SUBCOMMANDS: &[&str] = &[
-    "status", "log", "diff", "show", "blame", "ls-files", "ls-tree", "rev-parse", "fetch",
-    "remote", "branch", "tag", "describe", "shortlog", "reflog", "config", "help", "version",
-    "init", "clone", "push", "commit", "pull", "reset", "revert", "cherry-pick", "stash", "merge",
-    "rebase", "am", "add", "rm", "mv", "read-tree", "update-index", "apply", "checkout", "switch",
-    "worktree", "restore", "update-ref", "symbolic-ref", "submodule", "submodule--helper",
+    "status",
+    "log",
+    "diff",
+    "show",
+    "blame",
+    "ls-files",
+    "ls-tree",
+    "rev-parse",
+    "fetch",
+    "remote",
+    "branch",
+    "tag",
+    "describe",
+    "shortlog",
+    "reflog",
+    "config",
+    "help",
+    "version",
+    "init",
+    "clone",
+    "push",
+    "commit",
+    "pull",
+    "reset",
+    "revert",
+    "cherry-pick",
+    "stash",
+    "merge",
+    "rebase",
+    "am",
+    "add",
+    "rm",
+    "mv",
+    "read-tree",
+    "update-index",
+    "apply",
+    "checkout",
+    "switch",
+    "worktree",
+    "restore",
+    "update-ref",
+    "symbolic-ref",
+    "submodule",
+    "submodule--helper",
 ];
 
 pub(crate) fn is_known_git_subcommand(s: &str) -> bool {
@@ -857,7 +900,10 @@ pub(crate) fn is_agent_checkout_in_canonical(is_agent_caller: bool, canonical_cw
 /// argument (not a flag) and the worktree must be daemon-provisioned
 /// canonical-rooted, so the surface is limited to navigation within an
 /// already-materialized worktree.
-pub(crate) fn is_canonical_unbound_checkout_leniency(target_branch: &str, canonical_cwd: bool) -> bool {
+pub(crate) fn is_canonical_unbound_checkout_leniency(
+    target_branch: &str,
+    canonical_cwd: bool,
+) -> bool {
     !target_branch.is_empty() && !target_branch.starts_with('-') && canonical_cwd
 }
 

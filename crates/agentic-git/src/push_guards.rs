@@ -236,7 +236,8 @@ pub(crate) fn commit_is_empty_heartbeat(worktree: &str, hash: &str) -> bool {
 /// audit logs); `.gitignore` blocks the common ones but `git add -f` bypasses it,
 /// so this denylist is the push-time enforcement layer. Matched against a blob's
 /// repo-relative BASENAME / extension (see `trust_root_basename_denied`).
-pub(crate) const TRUST_ROOT_DENY_NAMES: &[&str] = &[".config-integrity-key", "policy.toml", "fleet.yaml"];
+pub(crate) const TRUST_ROOT_DENY_NAMES: &[&str] =
+    &[".config-integrity-key", "policy.toml", "fleet.yaml"];
 
 /// Whether a repo-relative blob path is a trust-root file: its BASENAME is an
 /// exact trust-root name, or it is an audit log (`*.jsonl`). Pure — fed by the

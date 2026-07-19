@@ -4,5 +4,6 @@
 //! links the EXACT same verifier/predicate source as the shim and no
 //! algorithm or ref-set drift is possible.
 
+pub mod binding;
 pub mod integrity_core;
 pub mod protected_refs;

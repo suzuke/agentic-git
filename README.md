@@ -1,5 +1,7 @@
 # agentic-git
 
+> Embedding agentic-git in your own orchestrator? Start with the [Embedder Contract v1](docs/embedder-contract-v1.md).
+
 [![ci](https://github.com/suzuke/agentic-git/actions/workflows/ci.yml/badge.svg)](https://github.com/suzuke/agentic-git/actions/workflows/ci.yml)
 
 **A guarded, transparent `git` for AI coding agents.**

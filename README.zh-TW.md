@@ -1,5 +1,7 @@
 # agentic-git
 
+> 要把 agentic-git 嵌入你自己的 orchestrator?從 [Embedder Contract v1](docs/embedder-contract-v1.md) 開始。
+
 **給 AI coding agent 的透明防護版 `git`。**
 
 `agentic-git` 是一個偽裝成 `git`、放在 agent PATH 上的 Rust binary。agent

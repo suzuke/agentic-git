@@ -817,6 +817,18 @@ fn disposition_for_covers_all_emitted_event_types_2379() {
         disposition_for("post_merge_cleanup_exempt"),
         Disposition::Info
     );
+    // #26: the forensic/audit instrumentation events (explicit, not the
+    // fail-closed default) — advisory bypass/canonical-touch, routine
+    // heartbeat forensics.
+    assert_eq!(disposition_for("bypass_mutating_op"), Disposition::Warn);
+    assert_eq!(
+        disposition_for("canonical_passthrough_checkout"),
+        Disposition::Warn
+    );
+    assert_eq!(
+        disposition_for("init_heartbeat_forensics"),
+        Disposition::Info
+    );
     // Fail-closed default: an unrecognized event_type reads as terminal, not advisory.
     assert_eq!(
         disposition_for("some_future_unmapped_event"),

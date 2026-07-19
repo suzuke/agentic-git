@@ -13,7 +13,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use agentic_git_core::integrity_core;
+use agentic_git_core::{binding, integrity_core};
 
 pub fn cli_main() -> ! {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -935,23 +935,25 @@ fn run_cmd(raw_args: &[String]) -> ! {
             format!("agent={agent}\nleased_at={issued_at}\n"),
         );
 
-        // Step 5: binding (schema v1) + HMAC sidecar.
-        let binding = serde_json::json!({
-            "version": 1,
-            "agent": agent,
-            "task_id": format!(
+        // Step 5: binding (schema v1) + HMAC sidecar — built through the
+        // core-owned typed codec (#26), so the reference writer and the shim
+        // reader share one representation by construction.
+        let binding_doc = binding::BindingV1 {
+            agent: Some(agent.clone()),
+            task_id: Some(format!(
                 "run-session-{}",
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0)
-            ),
-            "branch": branch,
-            "issued_at": issued_at,
-            "worktree": wt_path.to_string_lossy(),
-            "source_repo": source_repo.to_string_lossy(),
-        });
-        let content = match serde_json::to_string_pretty(&binding) {
+            )),
+            branch: Some(branch.clone()),
+            issued_at: Some(issued_at.clone()),
+            worktree: Some(wt_path.to_string_lossy().into_owned()),
+            source_repo: Some(source_repo.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let content = match binding::encode(&binding_doc) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("agentic-git: run: serialize binding: {e}");

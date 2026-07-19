@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // #2550 W4) live in the `agentic-git-core` crate so any embedding system —
 // this binary, a daemon, tests — links the EXACT same verifier/predicate
 // source and no signer/verifier or ref-set drift is possible.
-use agentic_git_core::{integrity_core, protected_refs};
+use agentic_git_core::{binding, integrity_core, protected_refs};
 
 /// #1504 L3: max times the shim may re-enter before hard-failing. Healthy
 /// operation never exceeds 1 (real git ≠ shim → no re-entry), so a small cap
@@ -577,14 +577,27 @@ fn read_binding(home: &str, agent: &str) -> Binding {
     if !verify_sidecar(home, content.as_bytes(), &tag) {
         return Binding::default();
     }
-    let v: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
+    // #26: decode through the core-owned typed v1 codec — the same
+    // representation the reference `run` writer (and the agend daemon) sign.
+    // An UNSUPPORTED version is surfaced LOUD (mirrors the HMAC scheme-skew
+    // posture) and fails closed to unbound: a v2 document may carry authority
+    // semantics this shim cannot enforce. A plain parse failure stays the
+    // silent unbound fail-safe it always was.
+    let doc = match binding::decode(&content) {
+        Ok(doc) => doc,
+        Err(binding::BindingDecodeError::UnsupportedVersion { found }) => {
+            eprintln!(
+                "agentic-git: binding format version {found} is not supported by this shim                  (implements v{}) — signer and shim were built from different contract                  versions; rebuild-together / rebind.",
+                binding::BINDING_FORMAT_VERSION
+            );
+            return Binding::default();
+        }
         Err(_) => return Binding::default(), // parse failure = unbound (fail-safe)
     };
     let b = Binding {
-        task_id: v["task_id"].as_str().map(String::from),
-        branch: v["branch"].as_str().map(String::from),
-        worktree: v["worktree"].as_str().map(String::from),
+        task_id: doc.task_id,
+        branch: doc.branch,
+        worktree: doc.worktree,
     };
     // P0-1.6: orphan binding defense.
     // If binding points to a worktree path that no longer exists (e.g. operator
@@ -1919,27 +1932,15 @@ fn log_nonagent_canonical_checkout(home: &str, agent: &str, args: &[String]) {
         .unwrap_or_default();
     let ppid = parent_pid();
     let ancestry = process_ancestry(8);
-    let event = serde_json::json!({
-        "kind": "git_event",
-        "event": "canonical_passthrough_checkout",
-        "agent": agent,
-        "subcommand": subcmd,
-        "target_branch": target_branch,
-        "argv": args,
-        "cwd": cwd,
-        "ppid": ppid,
-        "process_ancestry": ancestry,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-    });
-    let events_path = PathBuf::from(home).join("fleet_events.jsonl");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(events_path)
-    {
-        use std::io::Write;
-        let _ = writeln!(f, "{event}");
-    }
+    // #26: canonical disposition-bearing shape + the shared appender.
+    let mut extra = serde_json::Map::new();
+    extra.insert("target_branch".into(), serde_json::json!(target_branch));
+    extra.insert("argv".into(), serde_json::json!(args));
+    extra.insert("cwd".into(), serde_json::json!(cwd));
+    extra.insert("ppid".into(), serde_json::json!(ppid));
+    extra.insert("process_ancestry".into(), serde_json::json!(ancestry));
+    let event = build_git_event("canonical_passthrough_checkout", agent, subcmd, extra);
+    append_git_event(home, &event);
     eprintln!(
         "[agentic-git #2234] non-agent canonical-cwd {subcmd} passthrough (HEAD-touching): target={target_branch} ppid={ppid} cwd={cwd} ancestry={ancestry:?}"
     );
@@ -1957,18 +1958,14 @@ fn build_bypass_audit_event(
     ancestry: &[String],
     bypass_layer: &str,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "kind": "git_event",
-        "event": "bypass_mutating_op",
-        "agent": agent,
-        "subcommand": subcmd,
-        "argv": args,
-        "cwd": cwd,
-        "ppid": ppid,
-        "process_ancestry": ancestry,
-        "bypass_layer": bypass_layer,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-    })
+    // #26: canonical disposition-bearing shape (shared builder).
+    let mut extra = serde_json::Map::new();
+    extra.insert("argv".into(), serde_json::json!(args));
+    extra.insert("cwd".into(), serde_json::json!(cwd));
+    extra.insert("ppid".into(), serde_json::json!(ppid));
+    extra.insert("process_ancestry".into(), serde_json::json!(ancestry));
+    extra.insert("bypass_layer".into(), serde_json::json!(bypass_layer));
+    build_git_event("bypass_mutating_op", agent, subcmd, extra)
 }
 
 /// #2158: audit a SUB-AGENT's own `AGENTIC_GIT_BYPASS=1 git <mutating>` op — the
@@ -1994,15 +1991,7 @@ fn log_bypass_mutating_op(home: &str, agent: &str, args: &[String]) {
         &ancestry,
         active_bypass_layer(),
     );
-    let events_path = PathBuf::from(home).join("fleet_events.jsonl");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(events_path)
-    {
-        use std::io::Write;
-        let _ = writeln!(f, "{event}");
-    }
+    append_git_event(home, &event);
     eprintln!(
         "[agentic-git #2158] AGENTIC_GIT_BYPASS mutating {subcmd} (stray-worktree vector): ppid={ppid} cwd={cwd} ancestry={ancestry:?}"
     );
@@ -2033,28 +2022,16 @@ fn log_init_heartbeat_forensics(home: &str, agent: &str, args: &[String]) {
     let ancestry = process_ancestry(8);
     let email = effective_git_email(&cwd).unwrap_or_default();
     let has_allow_empty = args.iter().any(|a| a == "--allow-empty");
-    let event = serde_json::json!({
-        "kind": "git_event",
-        "event": "init_heartbeat_forensics",
-        "agent": agent,
-        "subcommand": "commit",
-        "argv": args,
-        "allow_empty": has_allow_empty,
-        "cwd": cwd,
-        "ppid": ppid,
-        "process_ancestry": ancestry,
-        "git_user_email": email,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-    });
-    let events_path = PathBuf::from(home).join("fleet_events.jsonl");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(events_path)
-    {
-        use std::io::Write;
-        let _ = writeln!(f, "{event}");
-    }
+    // #26: canonical disposition-bearing shape + the shared appender.
+    let mut extra = serde_json::Map::new();
+    extra.insert("argv".into(), serde_json::json!(args));
+    extra.insert("allow_empty".into(), serde_json::json!(has_allow_empty));
+    extra.insert("cwd".into(), serde_json::json!(cwd));
+    extra.insert("ppid".into(), serde_json::json!(ppid));
+    extra.insert("process_ancestry".into(), serde_json::json!(ancestry));
+    extra.insert("git_user_email".into(), serde_json::json!(email));
+    let event = build_git_event("init_heartbeat_forensics", agent, "commit", extra);
+    append_git_event(home, &event);
     eprintln!(
         "[agentic-git #1463] init-heartbeat commit intercepted: agent={agent} email={email} ppid={ppid} cwd={cwd} ancestry={ancestry:?}"
     );
@@ -3256,9 +3233,57 @@ fn disposition_for(event_type: &str) -> Disposition {
         // #4: a snapshot failure is advisory, never terminal — the op still
         // ran (fail-open is the whole point); the agent should heed the
         // warning but is not blocked.
-        "cwd_worktree_drift" | "git_conflict" | "snapshot_failed" => Disposition::Warn,
-        "post_merge_cleanup_exempt" => Disposition::Info,
+        // #26: audited-bypass mutations and unattributed canonical HEAD-touches
+        // are advisory-noteworthy instrumentation, never terminal denials.
+        "cwd_worktree_drift" | "git_conflict" | "snapshot_failed" | "bypass_mutating_op"
+        | "canonical_passthrough_checkout" => Disposition::Warn,
+        // #26: heartbeat-pile forensics are routine instrumentation.
+        "post_merge_cleanup_exempt" | "init_heartbeat_forensics" => Disposition::Info,
         _ => Disposition::Deny,
+    }
+}
+
+/// #26: the canonical event-record builder — EVERY `fleet_events.jsonl`
+/// record carries `kind`/`event`/`disposition`/`agent`/`subcommand`/
+/// `timestamp` (disposition via the single-source [`disposition_for`]);
+/// callers contribute event-specific fields through `extra`. Pure, so each
+/// writer's json SHAPE stays unit-testable without touching the live process.
+fn build_git_event(
+    event_type: &str,
+    agent: &str,
+    subcmd: &str,
+    extra: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    // Canonical fields are AUTHORITATIVE: extras land first, the canonical
+    // envelope is written last so a caller-supplied key can never overwrite
+    // the routing fields (esp. `disposition` — the stop-vs-continue axis).
+    let mut map = extra;
+    map.insert("kind".into(), serde_json::json!("git_event"));
+    map.insert("event".into(), serde_json::json!(event_type));
+    map.insert(
+        "disposition".into(),
+        serde_json::json!(disposition_for(event_type).as_str()),
+    );
+    map.insert("agent".into(), serde_json::json!(agent));
+    map.insert("subcommand".into(), serde_json::json!(subcmd));
+    map.insert(
+        "timestamp".into(),
+        serde_json::json!(chrono::Utc::now().to_rfc3339()),
+    );
+    serde_json::Value::Object(map)
+}
+
+/// #26: the single best-effort `fleet_events.jsonl` appender (never blocks;
+/// callers `exec` real git immediately after).
+fn append_git_event(home: &str, event: &serde_json::Value) {
+    let events_path = PathBuf::from(home).join("fleet_events.jsonl");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(events_path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{event}");
     }
 }
 
@@ -3281,27 +3306,12 @@ fn write_git_event_typed(
     target_branch: Option<&str>,
     detail: Option<&str>,
 ) {
-    let events_path = PathBuf::from(home).join("fleet_events.jsonl");
-    let event = serde_json::json!({
-        "kind": "git_event",
-        "event": event_type,
-        // #2379 ②: deny|warn|info — the agent's stop-vs-continue routing axis.
-        "disposition": disposition_for(event_type).as_str(),
-        "agent": agent,
-        "subcommand": subcmd,
-        "target_branch": target_branch,
-        "reason": detail,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-    });
-    // Best-effort append (don't block on failure).
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(events_path)
-    {
-        use std::io::Write;
-        let _ = writeln!(f, "{}", event);
-    }
+    // #2379 ② / #26: disposition + shape come from the canonical builder.
+    let mut extra = serde_json::Map::new();
+    extra.insert("target_branch".into(), serde_json::json!(target_branch));
+    extra.insert("reason".into(), serde_json::json!(detail));
+    let event = build_git_event(event_type, agent, subcmd, extra);
+    append_git_event(home, &event);
 }
 
 fn is_conflict_capable(subcmd: &str) -> bool {

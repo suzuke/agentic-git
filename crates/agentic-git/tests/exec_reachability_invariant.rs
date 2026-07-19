@@ -334,9 +334,11 @@ fn scan_crate_src() -> Vec<String> {
 /// legitimate. Any diff in either direction fails `exec_reachability_invariant`.
 fn expected_whitelist() -> BTreeMap<String, usize> {
     let entries = [
-        // The two capability definitions themselves.
-        "lib.rs :: <top-level> :: def exec_real_git",
-        "lib.rs :: <top-level> :: def exec_with_conflict_guidance",
+        // The two capability definitions themselves — owned by the exec
+        // module since the #30 split (mechanical move, same bodies; the
+        // shim_main call sites below stay in lib.rs).
+        "exec.rs :: <top-level> :: def exec_real_git",
+        "exec.rs :: <top-level> :: def exec_with_conflict_guidance",
         // Bypass early path: `if should_bypass()` — audited/deny-checked
         // above the exec (§7 3-layer bypass; #2158 audit; #2234 deny).
         "lib.rs :: shim_main :: call exec_real_git @ if should_bypass",

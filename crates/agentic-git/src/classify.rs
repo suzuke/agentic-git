@@ -1142,4 +1142,3 @@ pub(crate) fn enforce_agent_canonical_bypass_deny(args: &[String]) {
     }
     std::process::exit(1);
 }
-

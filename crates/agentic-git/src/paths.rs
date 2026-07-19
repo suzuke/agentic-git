@@ -189,4 +189,3 @@ pub(crate) fn lexical_path_eq(a: &std::path::Path, b: &std::path::Path) -> bool 
         na == nb
     }
 }
-

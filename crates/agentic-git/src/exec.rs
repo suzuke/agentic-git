@@ -157,4 +157,3 @@ pub(crate) fn format_conflict_guidance() -> &'static str {
      3. git rebase --continue (or git merge --continue / git cherry-pick --continue)\n\
      Do NOT abandon and redo from scratch unless the conflict involves complex semantic changes you cannot resolve.\n"
 }
-

@@ -909,4 +909,3 @@ pub(crate) fn force_push_target(p: &PushArgv) -> (Option<String>, Option<String>
     });
     (remote, branch)
 }
-

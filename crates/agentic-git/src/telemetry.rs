@@ -362,4 +362,3 @@ pub(crate) fn write_git_event_typed(
     let event = build_git_event(event_type, agent, subcmd, extra);
     append_git_event(home, &event);
 }
-

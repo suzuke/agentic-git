@@ -4,7 +4,6 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-
 /// #778 Option 3 (originally) + #852 residual PR-A: detect that cwd
 /// is rooted inside a canonical-origin git repo — either a
 /// daemon-provisioned worktree (`.git` file with `gitdir:` pointer)

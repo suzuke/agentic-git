@@ -1,7 +1,6 @@
 //! Deny formatting + fleet event telemetry: `Disposition`,
 //! `build_git_event`/`append_git_event`, and the audit/forensic writers.
 
-
 use super::*;
 
 /// #2234 defect#2: record a NON-agent (no `AGENTIC_GIT_AGENT`) canonical-cwd

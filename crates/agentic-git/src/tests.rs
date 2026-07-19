@@ -1,4 +1,5 @@
 use super::*;
+use std::process::Command;
 
 // ── CR-2026-06-14: shim is_protected_ref must mirror the lib-side
 // case-insensitive E4.5 guard (kept in sync; see agent_ops.rs). ──
@@ -4271,11 +4272,13 @@ fn run_writer_uses_core_codec_26() {
 /// satisfy the guard.
 #[test]
 fn bespoke_events_route_canonical_disposition_26() {
-    let src = include_str!("lib.rs");
+    // #30: the bespoke writers moved from lib.rs into the telemetry module
+    // (items are `pub(crate) fn` there — the fn-boundary probe matches that).
+    let src = include_str!("telemetry.rs");
     let code_of = |func: &str| -> String {
         let start = src.find(func).unwrap_or_else(|| panic!("{func} exists"));
         let end = src[start..]
-            .find("\nfn ")
+            .find("\npub(crate) fn ")
             .map(|o| start + o)
             .unwrap_or(src.len());
         src[start..end]

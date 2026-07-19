@@ -4115,3 +4115,260 @@ fn submodule_unknown_flag_fail_closed_34() {
         );
     }
 }
+
+// ── #26 Embedder Contract v1 — RED guards ────────────────────────────────
+//
+// Frozen by decision d-20260719210556476178-40: core-owned typed versioned
+// binding codec shared by the reference `run` writer and the shim reader;
+// explicit unsupported-version fail-closed behavior; every emitted event
+// routed through the canonical disposition-bearing writer; published
+// embedder-contract doc whose event table matches code. Source scans read
+// via CARGO_MANIFEST_DIR so a missing target fails the assert, never the
+// compile.
+
+fn workspace_file_26(rel: &str) -> String {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel);
+    std::fs::read_to_string(&p).unwrap_or_default()
+}
+
+/// #26 RED 1: an UNSUPPORTED binding format version must fail closed to
+/// unbound even when the HMAC sidecar is valid — a v2-signed document may
+/// carry authority semantics (e.g. `sealed_by`) this shim cannot enforce.
+#[test]
+fn binding_unsupported_version_fails_closed_26() {
+    let home = home_1651("unsupported-v2");
+    let body = include_str!("../tests/fixtures/binding-unsupported-v2.json");
+    write_binding_1651(&home, "ag", body, true);
+    let b = read_binding(home.to_str().unwrap(), "ag");
+    assert!(
+        !is_bound(&b),
+        "#26: a validly-signed binding with version=2 must read as UNBOUND \
+         (unsupported-version fail-closed); task_id={:?}",
+        b.task_id
+    );
+    std::fs::remove_dir_all(home).ok();
+}
+
+/// #26 control: a legacy binding with NO version field stays compatible —
+/// it decodes as v1 and binds (agend zero-daemon-change adoption).
+#[test]
+fn binding_missing_version_stays_compatible_26() {
+    let home = home_1651("legacy-noversion");
+    let body = r#"{"task_id":"T-legacy","branch":"feat/legacy"}"#;
+    write_binding_1651(&home, "ag", body, true);
+    let b = read_binding(home.to_str().unwrap(), "ag");
+    assert!(
+        is_bound(&b),
+        "#26: a signed legacy (version-less) binding must stay bound"
+    );
+    assert_eq!(b.branch.as_deref(), Some("feat/legacy"));
+    std::fs::remove_dir_all(home).ok();
+}
+
+/// #26 control: golden agend-daemon and current-run binding shapes decode
+/// and bind with their exact identity fields (each fixture's worktree is
+/// repointed at a real dir so the orphan guard passes).
+#[test]
+fn binding_golden_fixtures_decode_26() {
+    let agend = include_str!("../tests/fixtures/binding-agend-v1.json");
+    let run = include_str!("../tests/fixtures/binding-run-v1.json");
+    let cases = [
+        ("agend", agend, "/tmp/golden/worktree", "t-20260719-golden-agend", "feat/26-golden-agend"),
+        ("run", run, "/tmp/golden/run-worktree", "run-session-1789000000", "feat/26-golden-run"),
+    ];
+    for (tag, fixture, wt_placeholder, task_id, branch) in cases {
+        let home = home_1651(&format!("golden-{tag}"));
+        let wt = home.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        let body = fixture.replace(wt_placeholder, wt.to_str().unwrap());
+        write_binding_1651(&home, "ag", &body, true);
+        let b = read_binding(home.to_str().unwrap(), "ag");
+        assert!(
+            is_bound(&b),
+            "#26 golden {tag}: must bind; task_id={:?}",
+            b.task_id
+        );
+        assert_eq!(b.task_id.as_deref(), Some(task_id), "#26 golden {tag}");
+        assert_eq!(b.branch.as_deref(), Some(branch), "#26 golden {tag}");
+        std::fs::remove_dir_all(home).ok();
+    }
+}
+
+/// #26 RED 2: the typed v1 binding codec must be CORE-owned — `agentic-git-core`
+/// exports a `binding` module with the typed document + decode/encode, so a
+/// second orchestrator consumes the same representation as the shim.
+#[test]
+fn core_owns_typed_binding_codec_26() {
+    let core_lib = workspace_file_26("crates/agentic-git-core/src/lib.rs");
+    assert!(
+        core_lib.contains("pub mod binding"),
+        "#26: agentic-git-core must export `pub mod binding` (typed v1 codec)"
+    );
+    let module = workspace_file_26("crates/agentic-git-core/src/binding.rs");
+    let needles = [
+        "pub struct BindingV1",
+        "pub fn decode",
+        "pub fn encode",
+        "UnsupportedVersion",
+    ];
+    for needle in needles {
+        assert!(
+            module.contains(needle),
+            "#26: core binding codec must define `{needle}`"
+        );
+    }
+}
+
+/// #26 RED 3: the shim reader must consume the core codec — no private
+/// unversioned `serde_json::Value` field-picking in `read_binding`.
+#[test]
+fn shim_reader_uses_core_codec_26() {
+    let src = include_str!("lib.rs");
+    let start = src.find("fn read_binding(").expect("read_binding exists");
+    let end = src[start..]
+        .find("\nfn ")
+        .map(|o| start + o)
+        .unwrap_or(src.len());
+    let body = &src[start..end];
+    assert!(
+        body.contains("binding::decode"),
+        "#26: read_binding must decode through agentic-git-core's typed \
+         binding codec (binding::decode), not ad-hoc Value field-picking"
+    );
+}
+
+/// #26 RED 4: the reference `run` writer must build + encode the SAME typed
+/// document (BindingV1 + binding::encode) it expects the shim to read.
+#[test]
+fn run_writer_uses_core_codec_26() {
+    let src = include_str!("cli.rs");
+    for needle in ["BindingV1", "binding::encode"] {
+        assert!(
+            src.contains(needle),
+            "#26: the `run` binding writer must use the core typed codec (`{needle}`)"
+        );
+    }
+}
+
+/// #26 RED 5: the three bespoke audit-event writers must route through the
+/// canonical disposition-bearing event shape — every record in
+/// fleet_events.jsonl carries `disposition` so agents route stop-vs-continue
+/// without re-deriving it from the event string.
+#[test]
+fn bespoke_events_route_canonical_disposition_26() {
+    let src = include_str!("lib.rs");
+    let funcs = [
+        "fn log_nonagent_canonical_checkout(",
+        "fn build_bypass_audit_event(",
+        "fn log_init_heartbeat_forensics(",
+    ];
+    for func in funcs {
+        let start = src.find(func).unwrap_or_else(|| panic!("{func} exists"));
+        let end = src[start..]
+            .find("\nfn ")
+            .map(|o| start + o)
+            .unwrap_or(src.len());
+        let body = &src[start..end];
+        assert!(
+            body.contains("disposition"),
+            "#26: `{func}` must emit through the canonical disposition-bearing \
+             event shape (found no `disposition` in its region)"
+        );
+    }
+}
+
+/// #26 RED 6: the forensic/audit event types get EXPLICIT dispositions —
+/// they are instrument-only records, never terminal denials, so the
+/// fail-closed Deny default must not be their steady state.
+#[test]
+fn disposition_for_maps_forensic_events_26() {
+    assert_eq!(
+        disposition_for("bypass_mutating_op"),
+        Disposition::Warn,
+        "#26: an audited bypass mutation is advisory-noteworthy, not a denial"
+    );
+    assert_eq!(
+        disposition_for("canonical_passthrough_checkout"),
+        Disposition::Warn,
+        "#26: an unattributed canonical HEAD-touch is the #2234 blind spot"
+    );
+    assert_eq!(
+        disposition_for("init_heartbeat_forensics"),
+        Disposition::Info,
+        "#26: heartbeat-pile forensics are routine instrumentation"
+    );
+}
+
+/// #26 RED 7: the Embedder Contract v1 doc must exist, be linked from the
+/// README, and carry the required contract sections.
+#[test]
+fn embedder_contract_doc_exists_and_linked_26() {
+    let doc = workspace_file_26("docs/embedder-contract-v1.md");
+    assert!(
+        !doc.is_empty(),
+        "#26: docs/embedder-contract-v1.md must exist at the workspace root"
+    );
+    let headings = [
+        "## Env",
+        "## Binding",
+        "## Events",
+        "## Hooks",
+        "## Trailers",
+        "## Orchestrator responsibility checklist",
+        "## Core crate boundary",
+        "## Minimal generic embed recipe",
+    ];
+    for heading in headings {
+        assert!(
+            doc.contains(heading),
+            "#26: embedder-contract-v1.md must contain the `{heading}` section"
+        );
+    }
+    for env_pair in ["AGENTIC_GIT_HOME", "AGEND_HOME", "AGENTIC_GIT_REAL_GIT"] {
+        assert!(
+            doc.contains(env_pair),
+            "#26: the Env table must cover `{env_pair}` (primary/legacy aliases)"
+        );
+    }
+    let readme = workspace_file_26("README.md");
+    assert!(
+        readme.contains("docs/embedder-contract-v1.md"),
+        "#26: README.md must link the embedder contract doc"
+    );
+}
+
+/// #26 RED 8: the doc's event-to-disposition table must MATCH the code's
+/// single-source `disposition_for` for every emitted event type (the
+/// issue's "matches code (or is generated/tested)" acceptance).
+#[test]
+fn doc_event_disposition_table_matches_code_26() {
+    let doc = workspace_file_26("docs/embedder-contract-v1.md");
+    assert!(!doc.is_empty(), "#26: contract doc must exist (see RED 7)");
+    let emitted = [
+        "deny",
+        "deny_trust_root",
+        "deny_protected_ref",
+        "deny_snapshot_ref_push",
+        "cwd_worktree_drift",
+        "git_conflict",
+        "snapshot_failed",
+        "post_merge_cleanup_exempt",
+        "bypass_mutating_op",
+        "canonical_passthrough_checkout",
+        "init_heartbeat_forensics",
+    ];
+    for event in emitted {
+        let needle = format!("`{event}`");
+        let row = doc
+            .lines()
+            .find(|l| l.starts_with('|') && l.contains(&needle))
+            .unwrap_or_else(|| panic!("#26: doc event table must list `{event}`"));
+        let disposition = disposition_for(event).as_str();
+        assert!(
+            row.contains(disposition),
+            "#26: doc row for `{event}` must carry disposition `{disposition}`; row: {row}"
+        );
+    }
+}

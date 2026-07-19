@@ -1,9 +1,11 @@
 //! #26 Embedder Contract v1: the typed, versioned binding document.
 //!
-//! This is the SINGLE representation of `runtime/<agent>/binding.json`
-//! shared by every writer (the agend daemon, the reference `agentic-git run`
-//! orchestrator) and every reader (the shim). A second orchestrator signs
-//! and writes exactly this document — see `docs/embedder-contract-v1.md`.
+//! This is the typed representation of `runtime/<agent>/binding.json` shared
+//! by the reference `agentic-git run` writer and the shim reader. The agend
+//! daemon does NOT link this crate — its zero-daemon-change compatibility is
+//! SCHEMA compatibility, pinned by the golden `binding-agend-v1.json`
+//! fixture. A second orchestrator signs and writes exactly this document —
+//! see `docs/embedder-contract-v1.md`.
 //!
 //! Version policy (v1 freeze): a document with NO `version` field is a
 //! legacy v1 (agend zero-daemon-change adoption); `version: 1` is v1; any
@@ -107,8 +109,9 @@ pub fn decode(json: &str) -> Result<BindingV1, BindingDecodeError> {
     serde_json::from_value(value).map_err(BindingDecodeError::Parse)
 }
 
-/// Encode a binding document (pretty-printed, the on-disk shape both the
-/// agend daemon and `agentic-git run` write before HMAC-signing).
+/// Encode a binding document (pretty-printed — the on-disk shape the
+/// reference `agentic-git run` writer signs; schema-compatible with what the
+/// agend daemon writes independently).
 pub fn encode(binding: &BindingV1) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(binding)
 }

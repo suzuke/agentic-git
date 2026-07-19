@@ -4264,31 +4264,81 @@ fn run_writer_uses_core_codec_26() {
     }
 }
 
-/// #26 RED 5: the three bespoke audit-event writers must route through the
-/// canonical disposition-bearing event shape — every record in
-/// fleet_events.jsonl carries `disposition` so agents route stop-vs-continue
-/// without re-deriving it from the event string.
+/// #26 RED 5 (strengthened per root preflight — the original
+/// `contains("disposition")` check was satisfiable by comments alone): the
+/// bespoke audit-event writers must route through the canonical builders by
+/// ACTUAL CALL WIRING, proven on comment-stripped source so prose can never
+/// satisfy the guard.
 #[test]
 fn bespoke_events_route_canonical_disposition_26() {
     let src = include_str!("lib.rs");
-    let funcs = [
-        "fn log_nonagent_canonical_checkout(",
-        "fn build_bypass_audit_event(",
-        "fn log_init_heartbeat_forensics(",
-    ];
-    for func in funcs {
+    let code_of = |func: &str| -> String {
         let start = src.find(func).unwrap_or_else(|| panic!("{func} exists"));
         let end = src[start..]
             .find("\nfn ")
             .map(|o| start + o)
             .unwrap_or(src.len());
-        let body = &src[start..end];
-        assert!(
-            body.contains("disposition"),
-            "#26: `{func}` must emit through the canonical disposition-bearing \
-             event shape (found no `disposition` in its region)"
-        );
+        src[start..end]
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with("//") || t.starts_with("///"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    // Two-hop wiring for the bypass pair: the pure shape builder delegates to
+    // build_git_event; the logger appends through the shared appender.
+    let cases: [(&str, &[&str]); 4] = [
+        ("fn build_bypass_audit_event(", &["build_git_event("]),
+        ("fn log_bypass_mutating_op(", &["append_git_event("]),
+        (
+            "fn log_nonagent_canonical_checkout(",
+            &["build_git_event(", "append_git_event("],
+        ),
+        (
+            "fn log_init_heartbeat_forensics(",
+            &["build_git_event(", "append_git_event("],
+        ),
+    ];
+    for (func, needles) in cases {
+        let code = code_of(func);
+        for needle in needles {
+            assert!(
+                code.contains(needle),
+                "#26: `{func}` must call `{needle}` (comment-stripped source) — \
+                 canonical envelope + shared appender wiring, not prose"
+            );
+        }
     }
+}
+
+/// #26 (root preflight): the canonical envelope is AUTHORITATIVE — a caller
+/// extra that collides with a reserved routing field must never win.
+#[test]
+fn canonical_event_fields_win_over_extras_26() {
+    let mut extra = serde_json::Map::new();
+    extra.insert("kind".into(), serde_json::json!("spoofed_kind"));
+    extra.insert("event".into(), serde_json::json!("spoofed_event"));
+    extra.insert("disposition".into(), serde_json::json!("info"));
+    extra.insert("agent".into(), serde_json::json!("spoofed_agent"));
+    extra.insert("subcommand".into(), serde_json::json!("spoofed_sub"));
+    extra.insert("timestamp".into(), serde_json::json!("1970-01-01T00:00:00Z"));
+    extra.insert("argv".into(), serde_json::json!(["push"]));
+    let ev = build_git_event("deny", "real-agent", "push", extra);
+    assert_eq!(ev["kind"], "git_event", "kind is canonical");
+    assert_eq!(ev["event"], "deny", "event is canonical");
+    assert_eq!(
+        ev["disposition"], "deny",
+        "disposition is canonical — the stop-vs-continue axis must be unspoofable"
+    );
+    assert_eq!(ev["agent"], "real-agent", "agent is canonical");
+    assert_eq!(ev["subcommand"], "push", "subcommand is canonical");
+    assert_ne!(
+        ev["timestamp"], "1970-01-01T00:00:00Z",
+        "timestamp is canonical (now), not the injected value"
+    );
+    assert_eq!(ev["argv"][0], "push", "non-reserved extras still pass through");
 }
 
 /// #26 RED 6: the forensic/audit event types get EXPLICIT dispositions —

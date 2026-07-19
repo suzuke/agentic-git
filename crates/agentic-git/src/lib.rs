@@ -1991,15 +1991,7 @@ fn log_bypass_mutating_op(home: &str, agent: &str, args: &[String]) {
         &ancestry,
         active_bypass_layer(),
     );
-    let events_path = PathBuf::from(home).join("fleet_events.jsonl");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(events_path)
-    {
-        use std::io::Write;
-        let _ = writeln!(f, "{event}");
-    }
+    append_git_event(home, &event);
     eprintln!(
         "[agentic-git #2158] AGENTIC_GIT_BYPASS mutating {subcmd} (stray-worktree vector): ppid={ppid} cwd={cwd} ancestry={ancestry:?}"
     );
@@ -3262,18 +3254,23 @@ fn build_git_event(
     subcmd: &str,
     extra: serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Value {
-    let mut event = serde_json::json!({
-        "kind": "git_event",
-        "event": event_type,
-        "disposition": disposition_for(event_type).as_str(),
-        "agent": agent,
-        "subcommand": subcmd,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-    });
-    if let serde_json::Value::Object(map) = &mut event {
-        map.extend(extra);
-    }
-    event
+    // Canonical fields are AUTHORITATIVE: extras land first, the canonical
+    // envelope is written last so a caller-supplied key can never overwrite
+    // the routing fields (esp. `disposition` — the stop-vs-continue axis).
+    let mut map = extra;
+    map.insert("kind".into(), serde_json::json!("git_event"));
+    map.insert("event".into(), serde_json::json!(event_type));
+    map.insert(
+        "disposition".into(),
+        serde_json::json!(disposition_for(event_type).as_str()),
+    );
+    map.insert("agent".into(), serde_json::json!(agent));
+    map.insert("subcommand".into(), serde_json::json!(subcmd));
+    map.insert(
+        "timestamp".into(),
+        serde_json::json!(chrono::Utc::now().to_rfc3339()),
+    );
+    serde_json::Value::Object(map)
 }
 
 /// #26: the single best-effort `fleet_events.jsonl` appender (never blocks;

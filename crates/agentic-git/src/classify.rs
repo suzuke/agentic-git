@@ -1188,3 +1188,46 @@ pub(crate) fn enforce_agent_canonical_bypass_deny(args: &[String]) {
     }
     std::process::exit(1);
 }
+
+// ── Arch14: cross-agent sibling read boundary ─────────────────────────
+
+/// Walk the full `ancestors()` chain of `dir` to find the nearest
+/// `.agend-managed` marker. Returns `(agent_name, managed_root)`.
+pub(crate) fn resolve_managed_marker(dir: &Path) -> Option<(String, PathBuf)> {
+    for ancestor in dir.ancestors() {
+        if let Ok(content) = std::fs::read_to_string(ancestor.join(".agend-managed")) {
+            let agent = content
+                .lines()
+                .find_map(|line| line.strip_prefix("agent="))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if let Some(a) = agent {
+                return Some((a, ancestor.to_path_buf()));
+            }
+        }
+    }
+    None
+}
+
+/// Detect when the effective read target is another agent's daemon-managed
+/// same-source worktree. Canonicalizes the target first so symlink aliases
+/// are resolved. Uses the canonical target (not the marker root) for the
+/// same-source commondir check, so a scratch repo nested under a managed
+/// worktree is correctly identified as foreign.
+pub(crate) fn detect_cross_agent_sibling_target(
+    agent: &str,
+    binding: &Binding,
+    target_dir: &Path,
+) -> Option<String> {
+    let canonical = std::fs::canonicalize(target_dir)
+        .unwrap_or_else(|_| target_dir.to_path_buf());
+    let (target_agent, _managed_root) = resolve_managed_marker(&canonical)?;
+    if target_agent == agent {
+        return None;
+    }
+    let caller_wt = binding.worktree.as_deref()?;
+    if paths_are_foreign(&canonical, Path::new(caller_wt)) {
+        return None;
+    }
+    Some(target_agent)
+}

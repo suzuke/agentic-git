@@ -253,6 +253,38 @@ fn shim_main() {
         None => &args,
     };
 
+    // Arch14: cross-agent sibling read boundary. A bound agent whose effective
+    // read target (cwd or leading -C) is another agent's daemon-managed
+    // same-source worktree must fail loudly — never silently return fabricated
+    // data via ChdirPass or leak the target's real data via Passthrough.
+    if is_bound(&binding) {
+        let effective_target =
+            effective_cwd_through_globals(&args, sub_idx.unwrap_or(args.len()));
+        if let Some(target_agent) =
+            detect_cross_agent_sibling_target(&agent, &binding, &effective_target)
+        {
+            eprintln!(
+                "agentic-git: DENIED \u{2014} agent '{agent}' cannot read from agent \
+                 '{target_agent}'\u{2019}s managed worktree '{}'. Cross-agent \
+                 worktree reads are structurally refused to prevent fabricated \
+                 target data. (#arch14)",
+                effective_target.display()
+            );
+            write_git_event_typed(
+                &home,
+                &agent,
+                subcommand,
+                "deny_cross_agent_sibling",
+                None,
+                Some(&format!(
+                    "caller={agent} target_agent={target_agent} target={}",
+                    effective_target.display()
+                )),
+            );
+            std::process::exit(1);
+        }
+    }
+
     // #2234: loud WARN for the cwd↔bound-worktree drift. When a bound agent's cwd
     // is its `<home>/workspace/<agent>` clone — a SEPARATE git object store from its
     // bound worktree — the shim routes git to the worktree (ChdirPass) while the

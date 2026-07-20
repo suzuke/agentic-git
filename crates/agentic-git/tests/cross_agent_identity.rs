@@ -329,3 +329,81 @@ fn cross_agent_write_isolation() {
     );
     std::fs::remove_dir_all(&home).ok();
 }
+
+/// Symlink alias pointing into agent-b's worktree must be resolved and denied.
+#[test]
+fn cross_agent_symlink_alias_denied() {
+    let home = fixture_home("sym");
+    let (_src, _wt_a, wt_b) = two_agent_fixture(&home);
+    let alias = home.join("alias-to-b");
+    std::os::unix::fs::symlink(&wt_b, &alias).unwrap();
+
+    let out = run_shim(&alias, &home, "agent-a", &["branch", "--show-current"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "symlink alias into sibling must fail; got exit=0 stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("agent-a") && stderr.contains("agent-b"),
+        "stderr must name both agents: {stderr:?}"
+    );
+    assert!(
+        !stdout.contains("feat/a") && !stdout.contains("feat/b"),
+        "stdout must carry no branch data: {stdout:?}"
+    );
+    std::fs::remove_dir_all(&home).ok();
+}
+
+/// >64-level nested path inside sibling worktree must still be denied.
+#[test]
+fn cross_agent_deep_nested_denied() {
+    let home = fixture_home("deep");
+    let (_src, _wt_a, wt_b) = two_agent_fixture(&home);
+    let mut deep = wt_b.clone();
+    for i in 0..70 {
+        deep = deep.join(format!("d{i}"));
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+
+    let out = run_shim(&deep, &home, "agent-a", &["branch", "--show-current"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        ">64-deep nested cross-agent read must fail; got exit=0 stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("agent-a") && stderr.contains("agent-b"),
+        "stderr must name both agents: {stderr:?}"
+    );
+    assert!(
+        !stdout.contains("feat/a") && !stdout.contains("feat/b"),
+        "stdout must carry no branch data: {stdout:?}"
+    );
+    std::fs::remove_dir_all(&home).ok();
+}
+
+/// Scratch repo nested UNDER a sibling worktree has a foreign commondir
+/// and must pass through — it's not the sibling's data.
+#[test]
+fn scratch_nested_under_sibling_passes() {
+    let home = fixture_home("nscratch");
+    let (_src, _wt_a, wt_b) = two_agent_fixture(&home);
+    let scratch = wt_b.join("vendor").join("scratch-repo");
+    std::fs::create_dir_all(&scratch).unwrap();
+    setup_git(&scratch, &["init", "-b", "scratch-main"]);
+    setup_git(
+        &scratch,
+        &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "s"],
+    );
+
+    let out = run_shim(&scratch, &home, "agent-a", &["status", "--porcelain"]);
+    assert!(
+        out.status.success(),
+        "scratch repo nested under sibling must pass: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::remove_dir_all(&home).ok();
+}

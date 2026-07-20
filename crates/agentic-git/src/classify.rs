@@ -1191,45 +1191,42 @@ pub(crate) fn enforce_agent_canonical_bypass_deny(args: &[String]) {
 
 // ── Arch14: cross-agent sibling read boundary ─────────────────────────
 
-/// Walk up from `dir` to find the nearest `.agend-managed` marker, parse its
-/// `agent=<name>` field. Returns `(agent_name, managed_root)`.
-/// Stops at filesystem root or after 64 ancestors (safety cap).
+/// Walk the full `ancestors()` chain of `dir` to find the nearest
+/// `.agend-managed` marker. Returns `(agent_name, managed_root)`.
 pub(crate) fn resolve_managed_marker(dir: &Path) -> Option<(String, PathBuf)> {
-    let mut cur = dir.to_path_buf();
-    for _ in 0..64 {
-        let marker = cur.join(".agend-managed");
-        if let Ok(content) = std::fs::read_to_string(&marker) {
+    for ancestor in dir.ancestors() {
+        if let Ok(content) = std::fs::read_to_string(ancestor.join(".agend-managed")) {
             let agent = content
                 .lines()
                 .find_map(|line| line.strip_prefix("agent="))
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
             if let Some(a) = agent {
-                return Some((a, cur));
+                return Some((a, ancestor.to_path_buf()));
             }
-        }
-        if !cur.pop() {
-            break;
         }
     }
     None
 }
 
 /// Detect when the effective read target is another agent's daemon-managed
-/// same-source worktree. Returns `Some(target_agent)` for the deny message;
-/// `None` when the target is safe (own worktree, unmanaged, different source,
-/// or the marker has no parseable agent field).
+/// same-source worktree. Canonicalizes the target first so symlink aliases
+/// are resolved. Uses the canonical target (not the marker root) for the
+/// same-source commondir check, so a scratch repo nested under a managed
+/// worktree is correctly identified as foreign.
 pub(crate) fn detect_cross_agent_sibling_target(
     agent: &str,
     binding: &Binding,
     target_dir: &Path,
 ) -> Option<String> {
-    let (target_agent, managed_root) = resolve_managed_marker(target_dir)?;
+    let canonical = std::fs::canonicalize(target_dir)
+        .unwrap_or_else(|_| target_dir.to_path_buf());
+    let (target_agent, _managed_root) = resolve_managed_marker(&canonical)?;
     if target_agent == agent {
         return None;
     }
     let caller_wt = binding.worktree.as_deref()?;
-    if paths_are_foreign(&managed_root, Path::new(caller_wt)) {
+    if paths_are_foreign(&canonical, Path::new(caller_wt)) {
         return None;
     }
     Some(target_agent)

@@ -4623,3 +4623,60 @@ fn arch14_detect_sibling_passes_different_source() {
     assert_eq!(result, None, "different source repo must pass");
     std::fs::remove_dir_all(&home).ok();
 }
+
+#[cfg(unix)]
+#[test]
+fn arch14_detect_sibling_denies_symlink_into_sibling() {
+    let home = arch14_home("detect-symlink");
+    let (_src, wt_a, wt_b) = arch14_sibling_fixture(&home);
+    let alias = home.join("alias-to-b");
+    std::os::unix::fs::symlink(&wt_b, &alias).unwrap();
+    let binding_a = Binding {
+        task_id: Some("t".into()),
+        branch: Some("feat/a".into()),
+        worktree: Some(wt_a.to_str().unwrap().into()),
+    };
+    let result = detect_cross_agent_sibling_target("agent-a", &binding_a, &alias);
+    assert_eq!(result, Some("agent-b".into()), "symlink alias into sibling must deny");
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn arch14_detect_sibling_denies_deep_nested_path() {
+    let home = arch14_home("detect-deep");
+    let (_src, wt_a, wt_b) = arch14_sibling_fixture(&home);
+    let mut deep = wt_b.clone();
+    for i in 0..70 {
+        deep = deep.join(format!("d{i}"));
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    let binding_a = Binding {
+        task_id: Some("t".into()),
+        branch: Some("feat/a".into()),
+        worktree: Some(wt_a.to_str().unwrap().into()),
+    };
+    let result = detect_cross_agent_sibling_target("agent-a", &binding_a, &deep);
+    assert_eq!(result, Some("agent-b".into()), ">64-deep nested path must still deny");
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn arch14_detect_sibling_passes_scratch_nested_under_sibling() {
+    let home = arch14_home("detect-nested-scratch");
+    let (_src, wt_a, wt_b) = arch14_sibling_fixture(&home);
+    let scratch = wt_b.join("vendor").join("scratch-repo");
+    std::fs::create_dir_all(&scratch).unwrap();
+    arch14_git(&scratch, &["init", "-b", "scratch-main"]);
+    arch14_git(
+        &scratch,
+        &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "s"],
+    );
+    let binding_a = Binding {
+        task_id: Some("t".into()),
+        branch: Some("feat/a".into()),
+        worktree: Some(wt_a.to_str().unwrap().into()),
+    };
+    let result = detect_cross_agent_sibling_target("agent-a", &binding_a, &scratch);
+    assert_eq!(result, None, "independent scratch repo nested under sibling must pass");
+    std::fs::remove_dir_all(&home).ok();
+}

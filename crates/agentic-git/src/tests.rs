@@ -1,4 +1,5 @@
 use super::*;
+use crate::classify::{detect_cross_agent_sibling_target, resolve_managed_marker};
 use std::process::Command;
 
 // ── CR-2026-06-14: shim is_protected_ref must mirror the lib-side
@@ -4493,31 +4494,46 @@ fn arch14_sibling_fixture(
 }
 
 #[test]
-fn arch14_parse_managed_marker_agent_present() {
-    let home = arch14_home("parse-present");
+fn arch14_resolve_marker_at_exact_dir() {
+    let home = arch14_home("resolve-exact");
     let dir = home.join("d");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(".agend-managed"), "agent=my-agent\nbranch=x\n").unwrap();
-    assert_eq!(parse_managed_marker_agent(&dir), Some("my-agent".into()));
+    let (agent, root) = resolve_managed_marker(&dir).expect("marker at exact dir");
+    assert_eq!(agent, "my-agent");
+    assert_eq!(root, dir);
     std::fs::remove_dir_all(&home).ok();
 }
 
 #[test]
-fn arch14_parse_managed_marker_absent() {
-    let home = arch14_home("parse-absent");
+fn arch14_resolve_marker_walks_up_from_nested() {
+    let home = arch14_home("resolve-nested");
+    let root = home.join("wt");
+    let nested = root.join("src").join("deep");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(root.join(".agend-managed"), "agent=nested-agent\nbranch=x\n").unwrap();
+    let (agent, found_root) = resolve_managed_marker(&nested).expect("marker via walk-up");
+    assert_eq!(agent, "nested-agent");
+    assert_eq!(found_root, root);
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn arch14_resolve_marker_absent() {
+    let home = arch14_home("resolve-absent");
     let dir = home.join("d");
     std::fs::create_dir_all(&dir).unwrap();
-    assert_eq!(parse_managed_marker_agent(&dir), None);
+    assert!(resolve_managed_marker(&dir).is_none());
     std::fs::remove_dir_all(&home).ok();
 }
 
 #[test]
-fn arch14_parse_managed_marker_no_agent_field() {
-    let home = arch14_home("parse-nofield");
+fn arch14_resolve_marker_no_agent_field() {
+    let home = arch14_home("resolve-nofield");
     let dir = home.join("d");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(".agend-managed"), "x\n").unwrap();
-    assert_eq!(parse_managed_marker_agent(&dir), None);
+    assert!(resolve_managed_marker(&dir).is_none());
     std::fs::remove_dir_all(&home).ok();
 }
 
@@ -4532,6 +4548,22 @@ fn arch14_detect_sibling_denies_cross_agent_same_source() {
     };
     let result = detect_cross_agent_sibling_target("agent-a", &binding_a, &wt_b);
     assert_eq!(result, Some("agent-b".into()), "cross-agent same-source must detect");
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn arch14_detect_sibling_denies_nested_path() {
+    let home = arch14_home("detect-nested");
+    let (_src, wt_a, wt_b) = arch14_sibling_fixture(&home);
+    let nested = wt_b.join("src").join("deep");
+    std::fs::create_dir_all(&nested).unwrap();
+    let binding_a = Binding {
+        task_id: Some("t".into()),
+        branch: Some("feat/a".into()),
+        worktree: Some(wt_a.to_str().unwrap().into()),
+    };
+    let result = detect_cross_agent_sibling_target("agent-a", &binding_a, &nested);
+    assert_eq!(result, Some("agent-b".into()), "nested path inside sibling must detect");
     std::fs::remove_dir_all(&home).ok();
 }
 

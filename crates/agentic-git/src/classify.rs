@@ -1191,15 +1191,28 @@ pub(crate) fn enforce_agent_canonical_bypass_deny(args: &[String]) {
 
 // ── Arch14: cross-agent sibling read boundary ─────────────────────────
 
-/// Parse the `agent=<name>` field from a `.agend-managed` marker file.
-/// Returns `None` if the marker doesn't exist or has no parseable agent.
-pub(crate) fn parse_managed_marker_agent(dir: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(dir.join(".agend-managed")).ok()?;
-    content
-        .lines()
-        .find_map(|line| line.strip_prefix("agent="))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+/// Walk up from `dir` to find the nearest `.agend-managed` marker, parse its
+/// `agent=<name>` field. Returns `(agent_name, managed_root)`.
+/// Stops at filesystem root or after 64 ancestors (safety cap).
+pub(crate) fn resolve_managed_marker(dir: &Path) -> Option<(String, PathBuf)> {
+    let mut cur = dir.to_path_buf();
+    for _ in 0..64 {
+        let marker = cur.join(".agend-managed");
+        if let Ok(content) = std::fs::read_to_string(&marker) {
+            let agent = content
+                .lines()
+                .find_map(|line| line.strip_prefix("agent="))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if let Some(a) = agent {
+                return Some((a, cur));
+            }
+        }
+        if !cur.pop() {
+            break;
+        }
+    }
+    None
 }
 
 /// Detect when the effective read target is another agent's daemon-managed
@@ -1211,12 +1224,12 @@ pub(crate) fn detect_cross_agent_sibling_target(
     binding: &Binding,
     target_dir: &Path,
 ) -> Option<String> {
-    let target_agent = parse_managed_marker_agent(target_dir)?;
+    let (target_agent, managed_root) = resolve_managed_marker(target_dir)?;
     if target_agent == agent {
         return None;
     }
     let caller_wt = binding.worktree.as_deref()?;
-    if paths_are_foreign(target_dir, Path::new(caller_wt)) {
+    if paths_are_foreign(&managed_root, Path::new(caller_wt)) {
         return None;
     }
     Some(target_agent)

@@ -198,6 +198,67 @@ fn cross_agent_dash_c_read_denied_with_identity() {
     std::fs::remove_dir_all(&home).ok();
 }
 
+/// agent-a reading from a NESTED subdirectory inside agent-b's worktree (cwd)
+/// must also fail loudly — the marker walk-up catches it.
+#[test]
+fn cross_agent_nested_cwd_read_denied_with_identity() {
+    let home = fixture_home("ncwd");
+    let (_src, _wt_a, wt_b) = two_agent_fixture(&home);
+    let nested = wt_b.join("src").join("deep");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    let out = run_shim(&nested, &home, "agent-a", &["branch", "--show-current"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "nested cwd cross-agent read must fail loudly; got exit=0 stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("agent-a") && stderr.contains("agent-b"),
+        "stderr must name both agents: {stderr:?}"
+    );
+    assert!(
+        !stdout.contains("feat/a") && !stdout.contains("feat/b"),
+        "stdout must carry no branch data: {stdout:?}"
+    );
+    std::fs::remove_dir_all(&home).ok();
+}
+
+/// agent-a reading from a nested path in agent-b's worktree via leading -C
+/// must also fail loudly.
+#[test]
+fn cross_agent_nested_dash_c_read_denied_with_identity() {
+    let home = fixture_home("ndashc");
+    let (_src, _wt_a, wt_b) = two_agent_fixture(&home);
+    let nested = wt_b.join("lib").join("sub");
+    std::fs::create_dir_all(&nested).unwrap();
+    let neutral = home.join("neutral");
+    std::fs::create_dir_all(&neutral).unwrap();
+
+    let out = run_shim(
+        &neutral,
+        &home,
+        "agent-a",
+        &["-C", nested.to_str().unwrap(), "rev-parse", "--abbrev-ref", "HEAD"],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "nested -C cross-agent read must fail loudly; got exit=0 stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("agent-a") && stderr.contains("agent-b"),
+        "stderr must name both agents: {stderr:?}"
+    );
+    assert!(
+        !stdout.contains("feat/a") && !stdout.contains("feat/b"),
+        "stdout must carry no branch data: {stdout:?}"
+    );
+    std::fs::remove_dir_all(&home).ok();
+}
+
 /// Same-agent reads are unchanged — agent-a reading from its own worktree
 /// still works normally.
 #[test]

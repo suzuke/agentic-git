@@ -1188,3 +1188,36 @@ pub(crate) fn enforce_agent_canonical_bypass_deny(args: &[String]) {
     }
     std::process::exit(1);
 }
+
+// ── Arch14: cross-agent sibling read boundary ─────────────────────────
+
+/// Parse the `agent=<name>` field from a `.agend-managed` marker file.
+/// Returns `None` if the marker doesn't exist or has no parseable agent.
+pub(crate) fn parse_managed_marker_agent(dir: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(dir.join(".agend-managed")).ok()?;
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("agent="))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Detect when the effective read target is another agent's daemon-managed
+/// same-source worktree. Returns `Some(target_agent)` for the deny message;
+/// `None` when the target is safe (own worktree, unmanaged, different source,
+/// or the marker has no parseable agent field).
+pub(crate) fn detect_cross_agent_sibling_target(
+    agent: &str,
+    binding: &Binding,
+    target_dir: &Path,
+) -> Option<String> {
+    let target_agent = parse_managed_marker_agent(target_dir)?;
+    if target_agent == agent {
+        return None;
+    }
+    let caller_wt = binding.worktree.as_deref()?;
+    if paths_are_foreign(target_dir, Path::new(caller_wt)) {
+        return None;
+    }
+    Some(target_agent)
+}

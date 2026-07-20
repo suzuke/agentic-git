@@ -4437,3 +4437,157 @@ fn doc_event_disposition_table_matches_code_26() {
         );
     }
 }
+
+// ── Arch14: cross-agent sibling read boundary unit tests ──────────────
+
+fn arch14_home(tag: &str) -> PathBuf {
+    let p = std::env::temp_dir().join(format!(
+        "agentic-git-arch14-{}-{}",
+        std::process::id(),
+        tag
+    ));
+    let _ = std::fs::remove_dir_all(&p);
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+fn arch14_git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("AGENTIC_GIT_BYPASS", "1")
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn arch14_sibling_fixture(
+    home: &Path,
+) -> (PathBuf, PathBuf, PathBuf) {
+    let src = home.join("source");
+    std::fs::create_dir_all(&src).unwrap();
+    arch14_git(&src, &["init", "-b", "main"]);
+    arch14_git(
+        &src,
+        &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "init"],
+    );
+    let wt_a = home.join("wt-a");
+    let wt_b = home.join("wt-b");
+    arch14_git(&src, &["worktree", "add", wt_a.to_str().unwrap(), "-b", "feat/a"]);
+    arch14_git(&src, &["worktree", "add", wt_b.to_str().unwrap(), "-b", "feat/b"]);
+
+    std::fs::write(
+        wt_a.join(".agend-managed"),
+        format!("agent=agent-a\nbranch=feat/a\nsource_repo={}\n", src.display()),
+    ).unwrap();
+    std::fs::write(
+        wt_b.join(".agend-managed"),
+        format!("agent=agent-b\nbranch=feat/b\nsource_repo={}\n", src.display()),
+    ).unwrap();
+
+    (src, wt_a, wt_b)
+}
+
+#[test]
+fn arch14_parse_managed_marker_agent_present() {
+    let home = arch14_home("parse-present");
+    let dir = home.join("d");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(".agend-managed"), "agent=my-agent\nbranch=x\n").unwrap();
+    assert_eq!(parse_managed_marker_agent(&dir), Some("my-agent".into()));
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn arch14_parse_managed_marker_absent() {
+    let home = arch14_home("parse-absent");
+    let dir = home.join("d");
+    std::fs::create_dir_all(&dir).unwrap();
+    assert_eq!(parse_managed_marker_agent(&dir), None);
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn arch14_parse_managed_marker_no_agent_field() {
+    let home = arch14_home("parse-nofield");
+    let dir = home.join("d");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(".agend-managed"), "x\n").unwrap();
+    assert_eq!(parse_managed_marker_agent(&dir), None);
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn arch14_detect_sibling_denies_cross_agent_same_source() {
+    let home = arch14_home("detect-sibling");
+    let (_src, wt_a, wt_b) = arch14_sibling_fixture(&home);
+    let binding_a = Binding {
+        task_id: Some("t".into()),
+        branch: Some("feat/a".into()),
+        worktree: Some(wt_a.to_str().unwrap().into()),
+    };
+    let result = detect_cross_agent_sibling_target("agent-a", &binding_a, &wt_b);
+    assert_eq!(result, Some("agent-b".into()), "cross-agent same-source must detect");
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn arch14_detect_sibling_passes_same_agent() {
+    let home = arch14_home("detect-same");
+    let (_src, wt_a, _wt_b) = arch14_sibling_fixture(&home);
+    let binding_a = Binding {
+        task_id: Some("t".into()),
+        branch: Some("feat/a".into()),
+        worktree: Some(wt_a.to_str().unwrap().into()),
+    };
+    let result = detect_cross_agent_sibling_target("agent-a", &binding_a, &wt_a);
+    assert_eq!(result, None, "same-agent must pass");
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn arch14_detect_sibling_passes_unmanaged() {
+    let home = arch14_home("detect-unmanaged");
+    let (_src, wt_a, _wt_b) = arch14_sibling_fixture(&home);
+    let scratch = home.join("scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let binding_a = Binding {
+        task_id: Some("t".into()),
+        branch: Some("feat/a".into()),
+        worktree: Some(wt_a.to_str().unwrap().into()),
+    };
+    let result = detect_cross_agent_sibling_target("agent-a", &binding_a, &scratch);
+    assert_eq!(result, None, "unmanaged dir must pass");
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn arch14_detect_sibling_passes_different_source() {
+    let home = arch14_home("detect-diffsrc");
+    let (_src, wt_a, _wt_b) = arch14_sibling_fixture(&home);
+    let src2 = home.join("source2");
+    std::fs::create_dir_all(&src2).unwrap();
+    arch14_git(&src2, &["init", "-b", "main"]);
+    arch14_git(
+        &src2,
+        &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "init"],
+    );
+    let wt_foreign = home.join("wt-foreign");
+    arch14_git(&src2, &["worktree", "add", wt_foreign.to_str().unwrap(), "-b", "feat/f"]);
+    std::fs::write(
+        wt_foreign.join(".agend-managed"),
+        "agent=agent-c\nbranch=feat/f\n",
+    ).unwrap();
+    let binding_a = Binding {
+        task_id: Some("t".into()),
+        branch: Some("feat/a".into()),
+        worktree: Some(wt_a.to_str().unwrap().into()),
+    };
+    let result = detect_cross_agent_sibling_target("agent-a", &binding_a, &wt_foreign);
+    assert_eq!(result, None, "different source repo must pass");
+    std::fs::remove_dir_all(&home).ok();
+}

@@ -1,5 +1,12 @@
 # agentic-git
 
+> [!IMPORTANT]
+> 此獨立 repository 已移至
+> [AgEnD-Terminal monorepo](https://github.com/suzuke/agend-terminal/tree/main/vendor/agentic-git)
+> 並封存為唯讀；後續開發與發版都在新位置進行。crates.io 套件名稱維持
+> `agentic-git`（自 0.2.4 起）與 `agentic-git-core`（自 0.2.1 起），
+> 本 repository 的歷史、tags 與 releases 仍保留供查閱。
+
 > 要把 agentic-git 嵌入你自己的 orchestrator?從 [Embedder Contract v1](docs/embedder-contract-v1.md) 開始。
 
 **給 AI coding agent 的透明防護版 `git`。**

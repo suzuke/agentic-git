@@ -1,5 +1,13 @@
 # agentic-git
 
+> [!IMPORTANT]
+> This standalone repository has moved to the
+> [AgEnD-Terminal monorepo](https://github.com/suzuke/agend-terminal/tree/main/vendor/agentic-git)
+> and is archived read-only. Development and releases continue there. The
+> crates.io packages remain `agentic-git` (from 0.2.4) and
+> `agentic-git-core` (from 0.2.1); this repository's history, tags, and
+> releases remain available for reference.
+
 > Embedding agentic-git in your own orchestrator? Start with the [Embedder Contract v1](docs/embedder-contract-v1.md).
 
 [![ci](https://github.com/suzuke/agentic-git/actions/workflows/ci.yml/badge.svg)](https://github.com/suzuke/agentic-git/actions/workflows/ci.yml)
